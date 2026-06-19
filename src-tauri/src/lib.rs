@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod docker;
 mod error;
+mod proxy;
 mod state;
 mod wsl;
 
@@ -94,6 +95,13 @@ pub fn run() {
             commands::terminal::terminal_kill,
         ])
         .setup(|app| {
+            // Path-translation Docker proxy so external `docker` / `docker compose`
+            // get Docker Desktop-style Windows bind paths (C:\… → /mnt/c/…).
+            tauri::async_runtime::spawn(crate::proxy::run(
+                crate::config::ENGINE_PROXY_PORT,
+                crate::config::ENGINE_PORT,
+            ));
+
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 

@@ -14,8 +14,15 @@ pub const DISTRO_NAME: &str = "litedock-engine";
 pub const ENGINE_HOST: &str = "127.0.0.1";
 
 /// Dedicated, uncommon port chosen to avoid clashing with other local Docker
-/// setups (Docker's conventional 2375/2376).
+/// setups (Docker's conventional 2375/2376). dockerd listens here; bollard and
+/// readiness checks talk to it directly.
 pub const ENGINE_PORT: u16 = 23750;
+
+/// Port of LiteDock's path-translation proxy. The Windows `docker` CLI points
+/// here (DOCKER_HOST); the proxy rewrites Windows bind paths (C:\… → /mnt/c/…)
+/// and forwards to dockerd on ENGINE_PORT — so Docker Desktop-style composes
+/// work unchanged.
+pub const ENGINE_PROXY_PORT: u16 = 23752;
 
 /// Path of the bundled rootfs relative to the Tauri resource directory.
 pub const ROOTFS_RESOURCE_REL: &str = "resources/litedock-engine.tar";
@@ -32,8 +39,10 @@ pub fn engine_http_url() -> String {
 }
 
 /// The `DOCKER_HOST` value the standard docker CLI uses to reach our engine.
+/// Points at the path-translation proxy (ENGINE_PROXY_PORT), not dockerd
+/// directly, so `docker` / `docker compose` get Docker Desktop-style behaviour.
 pub fn engine_tcp_url() -> String {
-    format!("tcp://{ENGINE_HOST}:{ENGINE_PORT}")
+    format!("tcp://{ENGINE_HOST}:{ENGINE_PROXY_PORT}")
 }
 
 /// `%LOCALAPPDATA%\LiteDock\engine` — where the distro is imported.
