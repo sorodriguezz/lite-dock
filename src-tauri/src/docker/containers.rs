@@ -408,7 +408,13 @@ pub async fn upload_file(
         .create_exec(
             id,
             CreateExecOptions::<String> {
-                cmd: Some(vec!["sh".into(), "-lc".into(), format!("cat > {quoted}")]),
+                // `head -c <len>` reads exactly the file's bytes and exits, so we
+                // don't depend on stdin EOF (which could hang the exec/upload).
+                cmd: Some(vec![
+                    "sh".into(),
+                    "-lc".into(),
+                    format!("head -c {} > {quoted}", bytes.len()),
+                ]),
                 attach_stdin: Some(true),
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
