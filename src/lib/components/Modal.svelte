@@ -10,17 +10,10 @@
   let { title, onClose, children, footer }: Props = $props();
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && onClose()} />
-
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div
-    class="modal"
-    role="dialog"
-    aria-modal="true"
-    tabindex="-1"
-    onclick={(e) => e.stopPropagation()}
-    onkeydown={(e) => e.stopPropagation()}
-  >
+<!-- Closes ONLY via the ✕ / footer buttons — clicking the backdrop (or Esc)
+     does not dismiss it, to avoid losing what you were doing by accident. -->
+<div class="modal-backdrop">
+  <div class="modal" role="dialog" aria-modal="true" tabindex="-1">
     <div class="modal-head">
       <h3>{title}</h3>
       <div style="flex:1"></div>

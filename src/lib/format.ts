@@ -42,8 +42,22 @@ export function wslPath(linux: string): string {
   return "\\\\wsl$\\litedock-engine\\" + linux.replace(/^\/+/, "").replace(/\//g, "\\");
 }
 
-/** Strip ANSI escape codes (we render plain text, not a full terminal). */
+/** Strip ANSI/terminal escape codes (we render plain text, not a full terminal). */
 export function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+  return (
+    s
+      // CSI sequences (colors, cursor movement): ESC [ … final-byte.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+      // OSC sequences (e.g. window title "ESC ] 0 ; … BEL/ST"), what shows up as
+      // `]0;user@host: ~` in shell prompts under a TTY.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+      // Charset-selection escapes like ESC ( B.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[()][0-9A-Za-z]/g, "")
+      // Any leftover control chars (stray ESC, BEL…), keeping tab/newline/CR.
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+  );
 }

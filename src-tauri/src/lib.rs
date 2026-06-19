@@ -110,6 +110,10 @@ pub fn run() {
             // Cheap and only acts when the value is exactly our direct port.
             std::thread::spawn(crate::wsl::heal_docker_host);
 
+            // Refresh docker integration in any distro we set up before, so an
+            // old/broken shim is auto-replaced by the current mechanism.
+            tauri::async_runtime::spawn(crate::wsl::repair_integrations());
+
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 

@@ -125,30 +125,48 @@ pub fn docker_host_enabled() -> bool {
     }
 }
 
-/// Self-heal a stale `DOCKER_HOST`. Older builds (and manual setups) pointed the
-/// CLI at the engine's DIRECT port (`127.0.0.1:ENGINE_PORT`), which bypasses the
-/// path-translation proxy and breaks Docker-Desktop-style Windows bind mounts
-/// (`C:\…`). If we find that exact value, rewrite it to the proxy URL so
-/// `docker` / `docker compose` always go through translation. We only touch a
-/// value that points at our OWN direct port — never an empty var (the user may
-/// have disabled the CLI) nor a third-party Docker endpoint. Runs at startup.
-pub fn heal_docker_host() {
-    let mut q = std::process::Command::new("reg");
-    q.args(["query", "HKCU\\Environment", "/v", "DOCKER_HOST"]);
+/// Read the persisted (User-scope) `DOCKER_HOST` value, or "" if unset.
+fn read_user_docker_host() -> String {
+    let mut c = std::process::Command::new("reg");
+    c.args(["query", "HKCU\\Environment", "/v", "DOCKER_HOST"]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        q.creation_flags(CREATE_NO_WINDOW);
+        c.creation_flags(CREATE_NO_WINDOW);
     }
-    let current = match q.output() {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
-        Err(_) => return,
-    };
-    let direct = format!("{}:{}", crate::config::ENGINE_HOST, crate::config::ENGINE_PORT);
+    match c.output() {
+        Ok(out) if out.status.success() => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // Line looks like: "    DOCKER_HOST    REG_SZ    <value>"
+            s.lines()
+                .find(|l| l.contains("DOCKER_HOST"))
+                .and_then(|l| l.split("REG_SZ").nth(1))
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Make sure the Windows `docker` CLI points at LiteDock's path-translation
+/// proxy — automatically, so the user never has to set `DOCKER_HOST` by hand.
+/// We (re)set it when it is unset, malformed, or points at ANY local endpoint:
+/// a fresh install (empty), the old direct port (`:23750`), or a half-typed
+/// value like just `23752`. A genuine remote Docker endpoint (a real dotted /
+/// remote host) is left untouched. Runs once at startup.
+pub fn heal_docker_host() {
     let proxy_url = crate::config::engine_tcp_url();
-    // Points at our direct port and NOT already the proxy → upgrade it.
-    if current.contains(direct.as_str()) && !current.contains(proxy_url.as_str()) {
+    let raw = read_user_docker_host();
+    let v = raw.trim();
+    if v == proxy_url.as_str() {
+        return; // already correct — nothing to do
+    }
+    let is_local_or_bad = v.is_empty()
+        || v.contains("127.0.0.1")
+        || v.contains("localhost")
+        || !v.contains('.'); // bare port / malformed / no real host
+    if is_local_or_bad {
         set_docker_host();
     }
 }
@@ -427,7 +445,7 @@ pub async fn list_distros() -> Vec<String> {
 pub async fn integration_status(distro: &str) -> bool {
     match run_in_distro(
         distro,
-        "grep -q litedock-engine /usr/local/bin/docker 2>/dev/null && echo yes || echo no",
+        "grep -q litedock /usr/local/bin/docker 2>/dev/null && echo yes || echo no",
     )
     .await
     {
@@ -440,14 +458,39 @@ pub async fn integration_status(distro: &str) -> bool {
 /// litedock-engine (so `docker` works inside that distro, like Docker Desktop's
 /// WSL integration). Remove with `integration_disable`.
 pub async fn integration_enable(distro: &str) -> AppResult<()> {
-    let engine = crate::config::DISTRO_NAME;
-    // printf with single-quoted args keeps `"$@"` literal in the shim file.
-    let script = format!(
-        "mkdir -p /usr/local/bin\n\
-printf '%s\\n' '#!/bin/sh' 'exec wsl.exe -d {engine} -u root -- docker \"$@\"' > /usr/local/bin/docker\n\
-printf '%s\\n' '#!/bin/sh' 'exec wsl.exe -d {engine} -u root -- docker compose \"$@\"' > /usr/local/bin/docker-compose\n\
-chmod +x /usr/local/bin/docker /usr/local/bin/docker-compose"
-    );
+    // Make `docker` work INSIDE `distro` WITHOUT WSL interop (which fails on some
+    // setups with "MZ: not found"). All WSL2 distros share the same localhost, so
+    // the engine's TCP port is reachable from here. We install a real, static
+    // docker CLI in the distro and a tiny wrapper that points it at the engine.
+    // `__PORT__` is substituted with the engine port; transported base64-encoded
+    // so it survives the trip through wsl.exe arg-quoting.
+    let template = r#"mkdir -p /usr/local/bin /usr/local/lib/litedock
+rm -f /usr/local/bin/docker /usr/local/bin/docker-compose
+arch=$(uname -m); case "$arch" in aarch64|arm64) a=aarch64;; *) a=x86_64;; esac
+dl() { if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"; else wget -qO "$2" "$1"; fi; }
+if [ ! -x /usr/local/lib/litedock/docker ]; then
+  tmp=$(mktemp -d); got=""
+  for v in 27.5.1 27.3.1 26.1.4 25.0.5 24.0.9; do
+    if dl "https://download.docker.com/linux/static/stable/$a/docker-$v.tgz" "$tmp/d.tgz"; then got="$v"; break; fi
+  done
+  if [ -z "$got" ]; then echo "litedock: no pude descargar el docker CLI (revisa la conexion)"; rm -rf "$tmp"; exit 1; fi
+  if ! tar -xzf "$tmp/d.tgz" -C "$tmp" docker/docker; then echo "litedock: archivo descargado invalido"; rm -rf "$tmp"; exit 1; fi
+  mv "$tmp/docker/docker" /usr/local/lib/litedock/docker
+  chmod +x /usr/local/lib/litedock/docker
+  rm -rf "$tmp"
+fi
+cat > /usr/local/bin/docker <<'EOF'
+#!/bin/sh
+export DOCKER_HOST="tcp://127.0.0.1:__PORT__"
+exec /usr/local/lib/litedock/docker "$@"
+EOF
+chmod +x /usr/local/bin/docker
+cat > /etc/profile.d/zz-litedock.sh <<'EOF'
+# Win over Docker Desktop's docker on PATH (this runs last in /etc/profile.d).
+export DOCKER_HOST="tcp://127.0.0.1:__PORT__"
+export PATH="/usr/local/lib/litedock:$PATH"
+EOF"#;
+    let script = template.replace("__PORT__", &crate::config::ENGINE_PORT.to_string());
     let (ok, _o, err) = run_in_distro(distro, &script).await?;
     if ok {
         Ok(())
@@ -462,7 +505,7 @@ chmod +x /usr/local/bin/docker /usr/local/bin/docker-compose"
 pub async fn integration_disable(distro: &str) -> AppResult<()> {
     let (ok, _o, err) = run_in_distro(
         distro,
-        "rm -f /usr/local/bin/docker /usr/local/bin/docker-compose",
+        "rm -rf /usr/local/bin/docker /usr/local/bin/docker-compose /usr/local/lib/litedock /etc/profile.d/zz-litedock.sh",
     )
     .await?;
     if ok {
@@ -471,5 +514,22 @@ pub async fn integration_disable(distro: &str) -> AppResult<()> {
         Err(AppError::other(format!(
             "no se pudo quitar la integración en {distro}: {err}"
         )))
+    }
+}
+
+/// On startup, refresh the docker integration in any distro we previously set up
+/// — so an out-of-date or broken shim (e.g. an old `wsl.exe`-forwarding one that
+/// fails with "MZ: not found") gets replaced by the current mechanism, with no
+/// user action. Runs once per session, best-effort, in the background.
+pub async fn repair_integrations() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    for d in list_distros().await {
+        if integration_status(&d).await {
+            let _ = integration_enable(&d).await;
+        }
     }
 }
