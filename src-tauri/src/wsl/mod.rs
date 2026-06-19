@@ -147,11 +147,12 @@ pub async fn app_usage() -> (f64, u64) {
     let script = format!(
         "$ErrorActionPreference='SilentlyContinue'; $ids=@({own}); \
 Get-CimInstance Win32_Process -Filter 'ParentProcessId={own}' | ForEach-Object {{ $ids += $_.ProcessId }}; \
-$a1=@(Get-Process -Id $ids)+@(Get-Process -Name vmmem,vmmemWSL); \
+$vmName=if(Get-Process -Name vmmemWSL){{ 'vmmemWSL' }}else{{ 'Vmmem' }}; \
+$a1=@(Get-Process -Id $ids)+@(Get-Process -Name $vmName); \
 $ram=($a1 | Measure-Object WorkingSet64 -Sum).Sum; \
 $c1=($a1 | Measure-Object CPU -Sum).Sum; \
 Start-Sleep -Milliseconds 400; \
-$a2=@(Get-Process -Id $ids)+@(Get-Process -Name vmmem,vmmemWSL); \
+$a2=@(Get-Process -Id $ids)+@(Get-Process -Name $vmName); \
 $c2=($a2 | Measure-Object CPU -Sum).Sum; \
 $cores=[Environment]::ProcessorCount; \
 $pct=if($cores -gt 0){{ (($c2-$c1)/0.4/$cores)*100 }}else{{ 0 }}; \

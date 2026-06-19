@@ -15,7 +15,7 @@
   let updateLines = $state<string[]>([]);
   let updateUnlisten: UnlistenFn | undefined;
 
-  let wslMemGb = $state("");
+  let wslMemMb = $state("");
   let wslReclaim = $state(false);
   let wslBusy = $state(false);
 
@@ -25,10 +25,13 @@
   });
   onDestroy(() => updateUnlisten?.());
 
+  // WSL needs a floor of RAM to boot the kernel + dockerd + a container.
+  const MIN_WSL_MB = 512;
+
   async function loadWsl() {
     try {
       const c = await api.wslConfigGet();
-      wslMemGb = c.memory_mb ? String(+(c.memory_mb / 1024).toFixed(1)) : "";
+      wslMemMb = c.memory_mb ? String(c.memory_mb) : "";
       wslReclaim = c.auto_reclaim;
     } catch {
       /* ignore */
@@ -36,15 +39,19 @@
   }
 
   async function applyWsl() {
-    const gb = wslMemGb.trim().replace(",", ".");
+    const raw = wslMemMb.trim().replace(",", ".");
     let memoryMb: number | null = null;
-    if (gb !== "") {
-      const n = parseFloat(gb);
+    if (raw !== "") {
+      const n = Math.round(parseFloat(raw));
       if (!isFinite(n) || n <= 0) {
-        notify("error", "Memoria inválida (usa GB, p. ej. 2)");
+        notify("error", "Memoria inválida (en MB, p. ej. 1024)");
         return;
       }
-      memoryMb = Math.max(512, Math.round(n * 1024));
+      if (n < MIN_WSL_MB) {
+        notify("error", `El mínimo es ${MIN_WSL_MB} MB para que WSL y Docker funcionen bien.`);
+        return;
+      }
+      memoryMb = n;
     }
     if (
       !confirm(
@@ -161,8 +168,8 @@
   <div class="label" style="margin-bottom:12px">Memoria de WSL (motor)</div>
   <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">
     <div class="field" style="margin:0">
-      <label for="wslmem">Límite de RAM (GB)</label>
-      <input id="wslmem" type="text" inputmode="decimal" placeholder="p. ej. 2" bind:value={wslMemGb} style="width:130px" />
+      <label for="wslmem">Límite de RAM (MB)</label>
+      <input id="wslmem" type="text" inputmode="numeric" placeholder="p. ej. 1024 (mín. 512)" bind:value={wslMemMb} style="width:170px" />
     </div>
     <label style="display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px;padding-bottom:9px">
       <input type="checkbox" bind:checked={wslReclaim} style="width:auto;margin:0" />
@@ -173,9 +180,9 @@
     </button>
   </div>
   <div style="color:var(--faint);font-size:12px;margin-top:8px">
-    Limita cuánta RAM puede usar el motor (es lo que reduce el consumo de <code>vmmem</code>).
-    Al aplicar se reinicia WSL: apaga y enciende el motor, y afecta a todas tus distros WSL.
-    Deja el campo vacío para quitar el límite.
+    Limita cuánta RAM puede usar el motor (es lo que reduce el consumo de <code>vmmemWSL</code>).
+    Mínimo 512 MB; recomendado ≥ 1024 MB para cargas reales. Deja el campo vacío para quitar el límite.
+    Al aplicar se reinicia WSL: apaga y enciende el motor (afecta a todas tus distros WSL).
   </div>
 </div>
 
