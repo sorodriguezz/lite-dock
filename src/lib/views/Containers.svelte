@@ -89,6 +89,46 @@
       .map((p) => `${p.public_port}:${p.private_port}/${p.type}`)
       .join(", ");
   }
+
+  // ── multi-select delete ──
+  let sel = $state<Record<string, boolean>>({});
+  let selectedIds = $derived(filtered.filter((c) => sel[c.id]).map((c) => c.id));
+  let allSelected = $derived(filtered.length > 0 && filtered.every((c) => sel[c.id]));
+  function toggleSel(id: string) {
+    sel = { ...sel, [id]: !sel[id] };
+  }
+  function toggleAll() {
+    if (allSelected) {
+      sel = {};
+    } else {
+      const next: Record<string, boolean> = {};
+      for (const c of filtered) next[c.id] = true;
+      sel = next;
+    }
+  }
+  async function bulkRemove() {
+    const ids = selectedIds;
+    if (ids.length === 0) return;
+    if (
+      !(await askConfirm({
+        message: `¿Eliminar ${ids.length} ${ids.length === 1 ? "contenedor" : "contenedores"} seleccionados? No se puede deshacer.`,
+      }))
+    )
+      return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await api.removeContainer(id, true);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    sel = {};
+    notify(fail ? "error" : "success", fail ? `${ok} eliminados, ${fail} con error` : `${ok} contenedores eliminados`);
+    load();
+  }
 </script>
 
 <div class="page-head">
@@ -96,6 +136,9 @@
   <h2>Contenedores</h2>
   <span class="count">{filtered.length}</span>
   <div class="grow"></div>
+  {#if selectedIds.length}
+    <button class="btn danger" onclick={bulkRemove}>Eliminar seleccionados ({selectedIds.length})</button>
+  {/if}
   <button class="btn primary" onclick={() => (showRun = true)}>Ejecutar contenedor</button>
   <input class="search" type="search" placeholder="Buscar nombre o imagen…" bind:value={q} />
   <button class="btn" onclick={load} disabled={loading}>
@@ -113,6 +156,7 @@
     <table>
       <thead>
         <tr>
+          <th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th>
           <th>Estado</th>
           <th>Nombre</th>
           <th>Imagen</th>
@@ -125,7 +169,7 @@
       <tbody>
         {#each grouped.groups as [proj, list] (proj)}
           <tr class="group-row" onclick={() => toggleGroup(proj)}>
-            <td colspan="7">
+            <td colspan="8">
               <div class="group-head">
                 <span class="group-chev {collapsed[proj] ? '' : 'open'}">▸</span>
                 <span style="color:var(--accent);display:inline-flex"><Icon name="container" size={15} /></span>
@@ -152,6 +196,9 @@
 
 {#snippet row(c: Container, inGroup: boolean)}
   <tr onclick={() => (selected = c)} style="cursor:pointer">
+    <td style="text-align:center" onclick={(e) => e.stopPropagation()}>
+      <input type="checkbox" checked={!!sel[c.id]} onchange={() => toggleSel(c.id)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" />
+    </td>
     <td class={inGroup ? "indent" : ""}>
       <span class="badge {c.state}"><span class="b-dot"></span>{c.state}</span>
     </td>

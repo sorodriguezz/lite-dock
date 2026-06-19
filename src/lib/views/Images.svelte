@@ -49,6 +49,46 @@
 
   let filtered = $derived(items.filter((i) => !q || primaryTag(i.tags).includes(q)));
 
+  // ── multi-select delete ──
+  let sel = $state<Record<string, boolean>>({});
+  let selectedIds = $derived(filtered.filter((i) => sel[i.id]).map((i) => i.id));
+  let allSelected = $derived(filtered.length > 0 && filtered.every((i) => sel[i.id]));
+  function toggleSel(id: string) {
+    sel = { ...sel, [id]: !sel[id] };
+  }
+  function toggleAll() {
+    if (allSelected) {
+      sel = {};
+    } else {
+      const next: Record<string, boolean> = {};
+      for (const i of filtered) next[i.id] = true;
+      sel = next;
+    }
+  }
+  async function bulkRemove() {
+    const ids = selectedIds;
+    if (ids.length === 0) return;
+    if (
+      !(await askConfirm({
+        message: `¿Eliminar ${ids.length} ${ids.length === 1 ? "imagen" : "imágenes"} seleccionadas? No se puede deshacer.`,
+      }))
+    )
+      return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await api.removeImage(id, true);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    sel = {};
+    notify(fail ? "error" : "success", fail ? `${ok} eliminadas, ${fail} con error` : `${ok} imágenes eliminadas`);
+    load();
+  }
+
   async function openPull() {
     showPull = true;
     pullLines = [];
@@ -157,6 +197,9 @@
   <h2>Imágenes</h2>
   <span class="count">{filtered.length}</span>
   <div class="grow"></div>
+  {#if selectedIds.length}
+    <button class="btn danger" onclick={bulkRemove}>Eliminar seleccionadas ({selectedIds.length})</button>
+  {/if}
   <input class="search" type="search" placeholder="Filtrar por tag…" bind:value={q} />
   <button class="btn primary" onclick={openPull}>Buscar / Descargar</button>
   <button class="btn" onclick={prune}>Limpiar huérfanas</button>
@@ -171,11 +214,12 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Tag</th><th>ID</th><th>Tamaño</th><th>Creada</th><th></th></tr>
+        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Tag</th><th>ID</th><th>Tamaño</th><th>Creada</th><th></th></tr>
       </thead>
       <tbody>
         {#each filtered as i (i.id)}
           <tr>
+            <td style="text-align:center"><input type="checkbox" checked={!!sel[i.id]} onchange={() => toggleSel(i.id)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" /></td>
             <td>
               <b>{primaryTag(i.tags)}</b>
               {#if i.dangling}<span class="badge" style="margin-left:6px">dangling</span>{/if}

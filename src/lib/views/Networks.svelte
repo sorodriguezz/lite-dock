@@ -50,6 +50,47 @@
   }
 
   const builtin = (n: string) => ["bridge", "host", "none"].includes(n);
+
+  // ── multi-select delete (built-in networks excluded) ──
+  let sel = $state<Record<string, boolean>>({});
+  let selectable = $derived(items.filter((n) => !builtin(n.name)));
+  let selectedNames = $derived(selectable.filter((n) => sel[n.name]).map((n) => n.name));
+  let allSelected = $derived(selectable.length > 0 && selectable.every((n) => sel[n.name]));
+  function toggleSel(name: string) {
+    sel = { ...sel, [name]: !sel[name] };
+  }
+  function toggleAll() {
+    if (allSelected) {
+      sel = {};
+    } else {
+      const next: Record<string, boolean> = {};
+      for (const n of selectable) next[n.name] = true;
+      sel = next;
+    }
+  }
+  async function bulkRemove() {
+    const names = selectedNames;
+    if (names.length === 0) return;
+    if (
+      !(await askConfirm({
+        message: `¿Eliminar ${names.length} ${names.length === 1 ? "red" : "redes"} seleccionadas?`,
+      }))
+    )
+      return;
+    let ok = 0;
+    let fail = 0;
+    for (const n of names) {
+      try {
+        await api.removeNetwork(n);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    sel = {};
+    notify(fail ? "error" : "success", fail ? `${ok} eliminadas, ${fail} con error` : `${ok} redes eliminadas`);
+    load();
+  }
 </script>
 
 <div class="page-head">
@@ -57,6 +98,9 @@
   <h2>Redes</h2>
   <span class="count">{items.length}</span>
   <div class="grow"></div>
+  {#if selectedNames.length}
+    <button class="btn danger" onclick={bulkRemove}>Eliminar seleccionadas ({selectedNames.length})</button>
+  {/if}
   <button class="btn primary" onclick={() => (showCreate = true)}>Crear red</button>
   <button class="btn" onclick={prune}>Limpiar sin usar</button>
   <button class="btn" onclick={load} disabled={loading}>
@@ -70,11 +114,16 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Nombre</th><th>Driver</th><th>Scope</th><th>Contenedores</th><th></th></tr>
+        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Nombre</th><th>Driver</th><th>Scope</th><th>Contenedores</th><th></th></tr>
       </thead>
       <tbody>
         {#each items as n (n.id)}
           <tr>
+            <td style="text-align:center">
+              {#if !builtin(n.name)}
+                <input type="checkbox" checked={!!sel[n.name]} onchange={() => toggleSel(n.name)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" />
+              {/if}
+            </td>
             <td>
               <b>{n.name}</b>
               {#if n.internal}<span class="badge" style="margin-left:6px">interna</span>{/if}

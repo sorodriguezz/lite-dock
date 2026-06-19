@@ -30,7 +30,7 @@ A helper script, `scripts\measure-benchmarks.ps1`, automates collection of the r
 | Windows edition | _Windows 11 Pro_ |
 | Windows build | _e.g. 22631_ |
 | WSL version | _output of `wsl --version`_ |
-| LiteDock version | _e.g. 1.0.0_ |
+| LiteDock version | _e.g. 1.1.0_ |
 | Docker Desktop version | _e.g. 4.x.x_ |
 | Date of measurement | _YYYY-MM-DD_ |
 
@@ -44,7 +44,7 @@ Measure the size of each downloaded installer file.
 
 ```powershell
 # Point these at the actual installer files you downloaded / built.
-$litedock = "src-tauri\target\release\bundle\nsis\LiteDock_1.0.0_x64-setup.exe"
+$litedock = "src-tauri\target\release\bundle\nsis\LiteDock_1.1.0_x64-setup.exe"
 $dockerDesktop = "$HOME\Downloads\Docker Desktop Installer.exe"
 
 "{0,-18} {1,8:N1} MB" -f "LiteDock:",       ((Get-Item $litedock).Length / 1MB)

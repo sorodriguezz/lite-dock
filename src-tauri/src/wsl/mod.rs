@@ -125,6 +125,34 @@ pub fn docker_host_enabled() -> bool {
     }
 }
 
+/// Self-heal a stale `DOCKER_HOST`. Older builds (and manual setups) pointed the
+/// CLI at the engine's DIRECT port (`127.0.0.1:ENGINE_PORT`), which bypasses the
+/// path-translation proxy and breaks Docker-Desktop-style Windows bind mounts
+/// (`C:\…`). If we find that exact value, rewrite it to the proxy URL so
+/// `docker` / `docker compose` always go through translation. We only touch a
+/// value that points at our OWN direct port — never an empty var (the user may
+/// have disabled the CLI) nor a third-party Docker endpoint. Runs at startup.
+pub fn heal_docker_host() {
+    let mut q = std::process::Command::new("reg");
+    q.args(["query", "HKCU\\Environment", "/v", "DOCKER_HOST"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        q.creation_flags(CREATE_NO_WINDOW);
+    }
+    let current = match q.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Err(_) => return,
+    };
+    let direct = format!("{}:{}", crate::config::ENGINE_HOST, crate::config::ENGINE_PORT);
+    let proxy_url = crate::config::engine_tcp_url();
+    // Points at our direct port and NOT already the proxy → upgrade it.
+    if current.contains(direct.as_str()) && !current.contains(proxy_url.as_str()) {
+        set_docker_host();
+    }
+}
+
 /// Synchronously terminate the engine distro. Used on app shutdown to free the
 /// distro's RAM immediately (a quick, blocking `wsl --terminate`).
 pub fn terminate_sync() {

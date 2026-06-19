@@ -13,6 +13,46 @@
   let name = $state("");
   let inspectJson = $state<string | null>(null);
 
+  // ── multi-select delete ──
+  let sel = $state<Record<string, boolean>>({});
+  let selectedNames = $derived(items.filter((v) => sel[v.name]).map((v) => v.name));
+  let allSelected = $derived(items.length > 0 && items.every((v) => sel[v.name]));
+  function toggleSel(name: string) {
+    sel = { ...sel, [name]: !sel[name] };
+  }
+  function toggleAll() {
+    if (allSelected) {
+      sel = {};
+    } else {
+      const next: Record<string, boolean> = {};
+      for (const v of items) next[v.name] = true;
+      sel = next;
+    }
+  }
+  async function bulkRemove() {
+    const names = selectedNames;
+    if (names.length === 0) return;
+    if (
+      !(await askConfirm({
+        message: `¿Eliminar ${names.length} ${names.length === 1 ? "volumen" : "volúmenes"} seleccionados? Se perderán sus datos.`,
+      }))
+    )
+      return;
+    let ok = 0;
+    let fail = 0;
+    for (const n of names) {
+      try {
+        await api.removeVolume(n, true);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    sel = {};
+    notify(fail ? "error" : "success", fail ? `${ok} eliminados, ${fail} con error` : `${ok} volúmenes eliminados`);
+    load();
+  }
+
   async function load() {
     loading = true;
     try {
@@ -62,6 +102,9 @@
   <h2>Volúmenes</h2>
   <span class="count">{items.length}</span>
   <div class="grow"></div>
+  {#if selectedNames.length}
+    <button class="btn danger" onclick={bulkRemove}>Eliminar seleccionados ({selectedNames.length})</button>
+  {/if}
   <button class="btn primary" onclick={() => (showCreate = true)}>Crear volumen</button>
   <button class="btn" onclick={prune}>Limpiar sin usar</button>
   <button class="btn" onclick={load} disabled={loading}>
@@ -75,11 +118,12 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Nombre</th><th>Driver</th><th>Ubicación (Windows)</th><th></th></tr>
+        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Nombre</th><th>Driver</th><th>Ubicación (Windows)</th><th></th></tr>
       </thead>
       <tbody>
         {#each items as v (v.name)}
           <tr>
+            <td style="text-align:center"><input type="checkbox" checked={!!sel[v.name]} onchange={() => toggleSel(v.name)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" /></td>
             <td>
               <button class="hash-copy" title="Copiar nombre"
                 onclick={() => copyText(v.name, "Nombre del volumen copiado")}><b>{v.name}</b></button>

@@ -105,6 +105,11 @@ pub fn run() {
                 crate::config::ENGINE_PORT,
             ));
 
+            // Self-heal a stale DOCKER_HOST left pointing at the direct engine
+            // port (bypasses path translation → breaks Windows bind mounts).
+            // Cheap and only acts when the value is exactly our direct port.
+            std::thread::spawn(crate::wsl::heal_docker_host);
+
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
