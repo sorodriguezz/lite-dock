@@ -1,0 +1,21 @@
+# Node / frontend
+node_modules
+dist
+.DS_Store
+*.log
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen/schemas
+
+# Bundled engine rootfs (build artifact — produced by engine/build-rootfs.sh)
+src-tauri/resources/*.tar
+src-tauri/resources/*.tar.gz
+
+# Bundled docker CLI (build artifact — fetched by scripts/fetch-docker-cli.ps1)
+src-tauri/resources/docker-cli/
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea

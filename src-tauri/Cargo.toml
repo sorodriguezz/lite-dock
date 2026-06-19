@@ -1,0 +1,47 @@
+[package]
+name = "litedock"
+version = "0.1.0"
+description = "LiteDock — lightweight Docker container manager for Windows"
+authors = ["LiteDock"]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT OR Apache-2.0"
+repository = ""
+
+# The Tauri app is split into a library (all logic) + a thin binary entry point.
+# This mirrors the official Tauri 2 template and keeps the door open for mobile.
+[lib]
+name = "litedock_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+
+# Docker Engine API client. Pinned to 0.17 for a stable, well-known API surface
+# (0.18+ moved option builders into `bollard::query_parameters`). Bump
+# deliberately — see docs/ARCHITECTURE.md.
+bollard = "0.17"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "process", "macros", "io-util", "time", "sync"] }
+futures-util = "0.3"
+thiserror = "1"
+
+[features]
+# This feature is used by `tauri build` to enable the production asset protocol.
+custom-protocol = ["tauri/custom-protocol"]
+
+# Default = FAST iteration build (a couple of minutes).
+# For the SMALLEST installer (slower ~10-15 min build), use the values noted in
+# the comments — flip `codegen-units = 1` and `lto = true` before a final release.
+[profile.release]
+panic = "abort"     # smaller binary, no unwinding tables
+codegen-units = 16  # parallel codegen → fast builds      (smallest: 1)
+lto = false         # skip link-time optimization         (smallest: true)
+opt-level = "s"     # still optimize for size
+strip = true        # strip symbols

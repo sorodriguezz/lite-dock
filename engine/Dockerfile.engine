@@ -1,0 +1,171 @@
+# syntax=docker/dockerfile:1
+#
+# =============================================================================
+#  LiteDock — Engine rootfs image
+# =============================================================================
+#
+#  This Dockerfile does NOT build a container you "run" in the normal sense.
+#  It assembles a minimal Alpine filesystem that we immediately `docker export`
+#  into a flat tarball (see engine/build-rootfs.sh). That tarball is then
+#  imported into WSL2 with:
+#
+#      wsl --import litedock-engine <dataDir> litedock-engine.tar --version 2
+#
+#  Because WSL2 distros are just a rootfs + a shared Microsoft kernel, there is
+#  NO systemd, NO OpenRC, and NO container runtime wrapping our processes when
+#  this image actually runs. The Windows app launches our init script directly
+#  as PID-ish foreground process via:
+#
+#      wsl -d litedock-engine -u root --exec /usr/local/bin/litedock-init.sh
+#
+#  Consequences that drive the choices below:
+#    * We cannot rely on service managers to start dockerd — our init script
+#      execs dockerd itself, in the foreground.
+#    * Everything that a normal distro's init would do (mount /var/run, enable
+#      ip_forward, pick the iptables backend) must be done by litedock-init.sh.
+#    * We keep the image as small as humanly possible: every megabyte here is a
+#      megabyte the user downloads and stores, and it is resident on disk for
+#      the life of the install.
+#
+#  Target platform: linux/amd64 (Windows 10 19041+ / 11, x64). An arm64 variant
+#  is future work — see engine/README.md.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Base image.
+#
+# We pin to a specific Alpine 3.20.x tag rather than ":latest" so that rebuilds
+# are reproducible and a surprise major bump can't silently change package
+# behaviour. Bump this deliberately when you want a newer base.
+#
+# Alpine is chosen because:
+#   * musl + busybox => a base image of ~7-8 MB.
+#   * The Docker engine, containerd, runc, buildx and compose are all packaged
+#     and maintained in the Alpine repositories (no need to vendor binaries).
+# -----------------------------------------------------------------------------
+FROM alpine:3.20.3
+
+# OCI labels — purely informational, they cost nothing and help debugging.
+LABEL org.opencontainers.image.title="litedock-engine-rootfs" \
+      org.opencontainers.image.description="Minimal Alpine rootfs that runs dockerd inside a dedicated WSL2 distro for LiteDock." \
+      org.opencontainers.image.licenses="Apache-2.0 AND MIT AND BSD-2-Clause" \
+      org.opencontainers.image.vendor="LiteDock"
+
+# -----------------------------------------------------------------------------
+# Packages.
+#
+# IMPORTANT: docker-cli-buildx and docker-cli-compose live in the Alpine
+# *community* repository, while docker/containerd/runc etc. also come from
+# community. The stock alpine:3.20 image already enables main + community in
+# /etc/apk/repositories, but we make it explicit and pass --no-cache so we
+# never carry an apk index in the exported rootfs.
+#
+# Package notes (Alpine names, verified against pkgs.alpinelinux.org v3.20):
+#   docker              -> the dockerd daemon + default config (the engine)
+#   docker-cli          -> the `docker` client binary
+#   containerd          -> container runtime daemon dockerd talks to
+#   runc                -> OCI runtime that actually spawns containers
+#   docker-cli-buildx   -> BuildKit-powered `docker buildx` (modern builds)
+#   docker-cli-compose  -> Compose v2 as the `docker compose` subcommand
+#   iptables            -> NAT / firewall rules dockerd programs for bridges
+#   ip6tables           -> IPv6 equivalent (docker touches it even if unused)
+#   ca-certificates     -> TLS trust store for pulling from registries
+#   e2fsprogs           -> mkfs/fsck for ext-style volumes some workflows need
+#   xz                  -> (de)compression used by image layers & tooling
+#   shadow              -> useradd/usermod etc. (handy for user namespaces)
+#   tzdata              -> timezone database so container clocks are sane
+#
+# We deliberately do NOT install bash: Alpine ships busybox `ash` as /bin/sh
+# and our scripts are POSIX-sh compatible, so adding bash would only add size.
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    apk add --no-cache \
+        docker \
+        docker-cli \
+        containerd \
+        runc \
+        docker-cli-buildx \
+        docker-cli-compose \
+        iptables \
+        ip6tables \
+        ca-certificates \
+        e2fsprogs \
+        xz \
+        shadow \
+        tzdata; \
+    # Refresh the CA bundle so ca-certificates is immediately usable.
+    update-ca-certificates 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# iptables backend: force the *legacy* (xtables) backend.
+#
+# Why: the WSL2 kernel historically ships without full nf_tables support, and
+# dockerd's bridge networking is most reliable on iptables-legacy inside WSL2.
+# Modern Alpine defaults the `iptables` command to the nft backend, which can
+# fail with "Table does not exist" style errors under WSL2.
+#
+# Alpine does NOT ship Debian-style `update-alternatives`; the supported,
+# documented way to switch backends here is to repoint the symlinks to the
+# *-legacy binaries. (On Debian/Ubuntu you'd use `update-alternatives
+# --set iptables /usr/sbin/iptables-legacy`; that tool is absent on Alpine.)
+#
+# We also set the backend again at runtime in litedock-init.sh as a belt-and-
+# suspenders guard, because a future apk upgrade inside the distro could reset
+# these symlinks.
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    ln -sf /sbin/iptables-legacy   /sbin/iptables; \
+    ln -sf /sbin/ip6tables-legacy  /sbin/ip6tables; \
+    # The kernel-facing helpers some tools call by full name — keep them aligned.
+    ln -sf /sbin/iptables-legacy-save    /sbin/iptables-save    2>/dev/null || true; \
+    ln -sf /sbin/iptables-legacy-restore /sbin/iptables-restore 2>/dev/null || true; \
+    ln -sf /sbin/ip6tables-legacy-save    /sbin/ip6tables-save    2>/dev/null || true; \
+    ln -sf /sbin/ip6tables-legacy-restore /sbin/ip6tables-restore 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# Configuration files baked into the rootfs.
+#
+# We copy from engine/files/* into their canonical locations. These paths are
+# CANONICAL — the Windows side of LiteDock expects exactly these:
+#   /usr/local/bin/litedock-init.sh   (foreground entrypoint)
+#   /etc/wsl.conf                     (WSL boot/automount/network behaviour)
+#   /etc/docker/daemon.json           (dockerd config)
+# -----------------------------------------------------------------------------
+
+# WSL distro configuration. Read by the WSL2 init before our script runs.
+COPY files/wsl.conf /etc/wsl.conf
+
+# dockerd configuration. NOTE: the listening sockets ("hosts") are intentionally
+# NOT set here — they are passed as --host flags in litedock-init.sh to avoid the
+# classic "unable to configure the Docker daemon: hosts in daemon.json and CLI
+# conflict" startup error. See engine/README.md.
+RUN mkdir -p /etc/docker
+COPY files/daemon.json /etc/docker/daemon.json
+
+# Foreground entrypoint. chmod via a separate RUN so it works regardless of the
+# host filesystem's executable-bit handling (Windows checkouts often lose +x).
+COPY files/litedock-init.sh /usr/local/bin/litedock-init.sh
+RUN chmod 0755 /usr/local/bin/litedock-init.sh
+
+# -----------------------------------------------------------------------------
+# Pre-create the runtime directories dockerd expects.
+#
+# In a real distro these would be created on boot. Because nothing boots us, we
+# bake them in so the very first launch is clean even before litedock-init.sh
+# has a chance to mkdir them (the script re-creates them too, idempotently).
+#
+#   /var/lib/docker  -> CANONICAL data-root (images, containers, volumes)
+#   /var/log         -> where we tee dockerd's log
+#   /var/run         -> docker.sock lives here; often a tmpfs at runtime
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    mkdir -p /var/lib/docker /var/log /var/run /etc/docker; \
+    chmod 0711 /var/lib/docker
+
+# -----------------------------------------------------------------------------
+# No CMD / ENTRYPOINT on purpose.
+#
+# This image is never `docker run`. WSL invokes /usr/local/bin/litedock-init.sh
+# explicitly. Leaving CMD unset avoids any confusion about how the engine is
+# meant to start, and keeps `docker export` output free of metadata we don't use.
+# -----------------------------------------------------------------------------

@@ -1,0 +1,92 @@
+name: Release
+
+# On every push to main: read the version from package.json. If that version
+# isn't tagged yet, build the engine rootfs (Linux runner) + the Windows
+# installer, then publish a GitHub Release tagged `v<version>` with the .exe so
+# users can download it. Bump the version in package.json to cut a new release.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check version / tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history so existing tags are visible
+      - id: v
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "Tag v$VERSION already exists — nothing to release."
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "New version v$VERSION — will build and release."
+          fi
+
+  engine:
+    name: Engine rootfs (Linux)
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ubuntu-latest ships with Docker, so the Docker-based rootfs build works.
+      - name: Build litedock-engine.tar
+        run: bash engine/build-rootfs.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: litedock-engine
+          path: src-tauri/resources/litedock-engine.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Windows installer + GitHub Release
+    needs: [check, engine]
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write # required to create the tag + release
+    steps:
+      - uses: actions/checkout@v4
+      # Pull the engine tar built by the `engine` job into the resources dir.
+      - uses: actions/download-artifact@v4
+        with:
+          name: litedock-engine
+          path: src-tauri/resources
+      # Bundle the Windows docker / docker-compose CLIs (all-in-one installer).
+      - name: Fetch bundled docker CLI
+        shell: pwsh
+        run: ./scripts/fetch-docker-cli.ps1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend deps
+        run: npm install
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - name: Build installer + publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v${{ needs.check.outputs.version }}
+          releaseName: LiteDock v${{ needs.check.outputs.version }}
+          releaseBody: |
+            Instalador de LiteDock para Windows (x64).
+            Descarga el archivo `.exe` de la sección **Assets** de abajo e instálalo.
+          releaseDraft: false
+          prerelease: false
