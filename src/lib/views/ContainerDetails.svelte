@@ -3,7 +3,7 @@
   import Modal from "../components/Modal.svelte";
   import LogConsole from "../components/LogConsole.svelte";
   import { api, listen, type UnlistenFn } from "../api";
-  import { notify } from "../stores";
+  import { notify, askConfirm } from "../stores";
   import type { Container, FileEntry, Stats } from "../types";
   import { stripAnsi, bytes } from "../format";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -211,7 +211,8 @@
   async function removeEntry(f: FileEntry) {
     const baseDir = browsePath === "/" ? "" : browsePath.replace(/\/$/, "");
     const target = `${baseDir}/${f.name}`;
-    if (!confirm(`¿Borrar "${f.name}" dentro del contenedor? No se puede deshacer.`)) return;
+    if (!(await askConfirm({ message: `¿Borrar "${f.name}" dentro del contenedor? No se puede deshacer.` })))
+      return;
     try {
       await api.containerDeletePath(container.id, target);
       notify("success", "Eliminado");

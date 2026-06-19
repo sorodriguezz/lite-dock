@@ -6,6 +6,7 @@
   import TopBar from "./lib/components/TopBar.svelte";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import Toasts from "./lib/components/Toasts.svelte";
+  import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import FirstRun from "./lib/views/FirstRun.svelte";
   import Dashboard from "./lib/views/Dashboard.svelte";
   import Containers from "./lib/views/Containers.svelte";
@@ -108,3 +109,4 @@
 {/if}
 
 <Toasts />
+<ConfirmDialog />

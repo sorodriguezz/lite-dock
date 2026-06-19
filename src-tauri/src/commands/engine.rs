@@ -156,3 +156,25 @@ pub async fn wsl_config_apply(
     crate::wsl::shutdown_all().await;
     lifecycle::ensure_running(&app, state.inner()).await
 }
+
+/// WSL distros that can host the docker-CLI integration.
+#[tauri::command]
+pub async fn wsl_list_distros() -> AppResult<Vec<String>> {
+    Ok(crate::wsl::list_distros().await)
+}
+
+/// Whether LiteDock's docker shim is installed in `distro`.
+#[tauri::command]
+pub async fn wsl_integration_get(distro: String) -> AppResult<bool> {
+    Ok(crate::wsl::integration_status(&distro).await)
+}
+
+/// Install/remove the docker-CLI integration (shims) in `distro`.
+#[tauri::command]
+pub async fn wsl_integration_set(distro: String, enable: bool) -> AppResult<()> {
+    if enable {
+        crate::wsl::integration_enable(&distro).await
+    } else {
+        crate::wsl::integration_disable(&distro).await
+    }
+}

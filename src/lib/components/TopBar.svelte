@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { engine, route, guard } from "../stores";
+  import { engine, route, guard, askConfirm } from "../stores";
   import { api } from "../api";
 
   const titles: Record<string, string> = {
@@ -31,6 +31,13 @@
     action = "";
   }
   async function stop() {
+    if (
+      !(await askConfirm({
+        title: "Detener el motor",
+        message: "Se detendrá el motor de LiteDock y los contenedores en ejecución. ¿Continuar?",
+      }))
+    )
+      return;
     busy = true;
     action = "stop";
     await guard(() => api.engineStop(), "Motor detenido");
@@ -39,6 +46,13 @@
     action = "";
   }
   async function restart() {
+    if (
+      !(await askConfirm({
+        title: "Reiniciar el motor",
+        message: "Se reiniciará el motor de LiteDock. ¿Continuar?",
+      }))
+    )
+      return;
     busy = true;
     action = "restart";
     await guard(() => api.engineRestart(), "Motor reiniciado");

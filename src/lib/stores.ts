@@ -31,6 +31,41 @@ export function notify(kind: ToastKind, text: string) {
   setTimeout(() => toasts.update((t) => t.filter((x) => x.id !== id)), 4200);
 }
 
+// ── confirmation dialog ────────────────────────────────────────────────
+export interface ConfirmReq {
+  id: number;
+  title: string;
+  message: string;
+  confirmText: string;
+  danger: boolean;
+  resolve: (ok: boolean) => void;
+}
+/** Current pending confirmation, rendered once by <ConfirmDialog/> at the app root. */
+export const confirmReq = writable<ConfirmReq | null>(null);
+
+/**
+ * Ask the user to confirm a destructive/disruptive action. Resolves `true` if
+ * they choose Sí, `false` on No / Escape / backdrop. Usage:
+ *   if (!(await askConfirm({ message: "¿Eliminar…?" }))) return;
+ */
+export function askConfirm(opts: {
+  title?: string;
+  message: string;
+  confirmText?: string;
+  danger?: boolean;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    confirmReq.set({
+      id: ++nextId,
+      title: opts.title ?? "¿Estás seguro?",
+      message: opts.message,
+      confirmText: opts.confirmText ?? "Sí, continuar",
+      danger: opts.danger ?? true,
+      resolve,
+    });
+  });
+}
+
 /** Copy text to the clipboard and show a confirmation toast. */
 export async function copyText(text: string, label = "Copiado al portapapeles") {
   try {

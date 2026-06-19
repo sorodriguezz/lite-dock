@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../api";
-  import { guard, notify } from "../stores";
+  import { guard, notify, askConfirm } from "../stores";
   import type { Network } from "../types";
   import Modal from "../components/Modal.svelte";
   import { shortId } from "../format";
@@ -34,9 +34,11 @@
     }
   }
   async function remove(n: Network) {
+    if (!(await askConfirm({ message: `¿Eliminar la red "${n.name}"?` }))) return;
     if (await guard(() => api.removeNetwork(n.name), "Red eliminada")) load();
   }
   async function prune() {
+    if (!(await askConfirm({ message: "¿Eliminar todas las redes sin usar?" }))) return;
     if (await guard(() => api.pruneNetworks(), "Redes sin usar eliminadas")) load();
   }
   async function inspect(n: Network) {

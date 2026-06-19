@@ -1,6 +1,6 @@
 [package]
 name = "litedock"
-version = "0.2.1"
+version = "1.0.0"
 description = "LiteDock — lightweight Docker container manager for Windows"
 authors = ["LiteDock"]
 edition = "2021"

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, listen, type UnlistenFn } from "../api";
-  import { guard, notify, copyText, imagesFilter } from "../stores";
+  import { guard, notify, copyText, imagesFilter, askConfirm } from "../stores";
   import { get } from "svelte/store";
   import Icon from "../components/Icon.svelte";
   import type { Image, SearchResult } from "../types";
@@ -135,9 +135,12 @@
   }
 
   async function remove(i: Image) {
+    if (!(await askConfirm({ message: `¿Eliminar la imagen "${primaryTag(i.tags)}"? No se puede deshacer.` })))
+      return;
     if (await guard(() => api.removeImage(i.id, true), "Imagen eliminada")) load();
   }
   async function prune() {
+    if (!(await askConfirm({ message: "¿Eliminar todas las imágenes huérfanas (dangling)?" }))) return;
     if (await guard(() => api.pruneImages(), "Imágenes huérfanas eliminadas")) load();
   }
   async function showHistory(i: Image) {

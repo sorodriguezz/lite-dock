@@ -2,7 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { onDestroy } from "svelte";
   import { api, listen, type UnlistenFn } from "../api";
-  import { notify } from "../stores";
+  import { notify, askConfirm } from "../stores";
   import LogConsole from "../components/LogConsole.svelte";
   import type { OutputLine } from "../types";
   import { stripAnsi } from "../format";
@@ -47,6 +47,14 @@
       notify("error", "Selecciona un archivo compose");
       return;
     }
+    if (
+      kind === "down" &&
+      !(await askConfirm({
+        title: "Compose down",
+        message: `¿Detener y eliminar el proyecto "${project || "compose"}"? Se borrarán sus contenedores y redes.`,
+      }))
+    )
+      return;
     busy = true;
     lines = [];
     await ensureListener();

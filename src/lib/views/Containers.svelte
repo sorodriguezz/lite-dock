@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../api";
-  import { guard, notify, copyText, route, imagesFilter } from "../stores";
+  import { guard, notify, copyText, route, imagesFilter, askConfirm } from "../stores";
   import type { Container, Stats } from "../types";
   import { shortId, bytes } from "../format";
   import Icon from "../components/Icon.svelte";
@@ -77,6 +77,11 @@
   }
   async function act(fn: () => Promise<unknown>, msg: string) {
     if (await guard(fn, msg)) load();
+  }
+  // Like `act`, but asks for confirmation first (restart / stop / remove).
+  async function confirmAct(message: string, fn: () => Promise<unknown>, msg: string) {
+    if (!(await askConfirm({ message }))) return;
+    await act(fn, msg);
   }
   function ports(c: Container): string {
     return c.ports
@@ -178,13 +183,13 @@
     <td onclick={(e) => e.stopPropagation()}>
       <div class="cell-actions">
         {#if c.state === "running"}
-          <button class="btn icon" title="Reiniciar" aria-label="Reiniciar" onclick={() => act(() => api.restartContainer(c.id), "Reiniciado")}>
+          <button class="btn icon" title="Reiniciar" aria-label="Reiniciar" onclick={() => confirmAct(`¿Reiniciar el contenedor "${c.name}"?`, () => api.restartContainer(c.id), "Reiniciado")}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 4v4h-4" /></svg>
           </button>
           <button class="btn icon" title="Pausar" aria-label="Pausar" onclick={() => act(() => api.pauseContainer(c.id), "Pausado")}>
             <svg viewBox="0 0 24 24" fill="currentColor"><rect x="8" y="5" width="3.2" height="14" rx="1" /><rect x="12.8" y="5" width="3.2" height="14" rx="1" /></svg>
           </button>
-          <button class="btn icon" title="Detener" aria-label="Detener" onclick={() => act(() => api.stopContainer(c.id), "Detenido")}>
+          <button class="btn icon" title="Detener" aria-label="Detener" onclick={() => confirmAct(`¿Detener el contenedor "${c.name}"?`, () => api.stopContainer(c.id), "Detenido")}>
             <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
           </button>
         {:else if c.state === "paused"}
@@ -196,7 +201,7 @@
             <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="7 4 20 12 7 20" /></svg>
           </button>
         {/if}
-        <button class="btn icon danger" title="Eliminar" aria-label="Eliminar" onclick={() => act(() => api.removeContainer(c.id, true), "Eliminado")}>
+        <button class="btn icon danger" title="Eliminar" aria-label="Eliminar" onclick={() => confirmAct(`¿Eliminar el contenedor "${c.name}"? No se puede deshacer.`, () => api.removeContainer(c.id, true), "Eliminado")}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
         </button>
       </div>

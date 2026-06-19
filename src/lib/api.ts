@@ -34,6 +34,10 @@ export const api = {
     invoke<{ memory_mb: number | null; auto_reclaim: boolean }>("wsl_config_get"),
   wslConfigApply: (memoryMb: number | null, autoReclaim: boolean) =>
     invoke<void>("wsl_config_apply", { memoryMb, autoReclaim }),
+  wslListDistros: () => invoke<string[]>("wsl_list_distros"),
+  wslIntegrationGet: (distro: string) => invoke<boolean>("wsl_integration_get", { distro }),
+  wslIntegrationSet: (distro: string, enable: boolean) =>
+    invoke<void>("wsl_integration_set", { distro, enable }),
 
   // ── setup ────────────────────────────────────────────────────────
   setupDetect: () => invoke<WslStatus>("setup_detect"),
@@ -77,6 +81,8 @@ export const api = {
     env: string[];
     volumes: string[];
     restart: string;
+    pull: boolean;
+    publishAll: boolean;
   }) => invoke<string>("run_container", p),
 
   // ── images ───────────────────────────────────────────────────────

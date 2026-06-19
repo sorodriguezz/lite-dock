@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { engine, notify } from "../stores";
+  import { engine, notify, askConfirm } from "../stores";
   import { api, listen, type UnlistenFn } from "../api";
   import { stripAnsi } from "../format";
   import Modal from "../components/Modal.svelte";
@@ -12,6 +12,8 @@
 
   let showUpdate = $state(false);
   let updating = $state(false);
+  let updateDone = $state(false);
+  let updateOk = $state(false);
   let updateLines = $state<string[]>([]);
   let updateUnlisten: UnlistenFn | undefined;
 
@@ -19,9 +21,15 @@
   let wslReclaim = $state(false);
   let wslBusy = $state(false);
 
+  let wslDistros = $state<string[]>([]);
+  let wslDistro = $state("");
+  let wslIntegOn = $state(false);
+  let wslIntegBusy = $state(false);
+
   onMount(() => {
     refreshCli();
     loadWsl();
+    loadDistros();
   });
   onDestroy(() => updateUnlisten?.());
 
@@ -36,6 +44,41 @@
     } catch {
       /* ignore */
     }
+  }
+
+  async function loadDistros() {
+    try {
+      wslDistros = await api.wslListDistros();
+      if (!wslDistro && wslDistros.length) {
+        wslDistro = wslDistros[0];
+        checkIntegration();
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  async function checkIntegration() {
+    if (!wslDistro) return;
+    try {
+      wslIntegOn = await api.wslIntegrationGet(wslDistro);
+    } catch {
+      wslIntegOn = false;
+    }
+  }
+  async function toggleIntegration() {
+    if (!wslDistro) return;
+    wslIntegBusy = true;
+    try {
+      await api.wslIntegrationSet(wslDistro, !wslIntegOn);
+      wslIntegOn = !wslIntegOn;
+      notify(
+        "success",
+        wslIntegOn ? `docker integrado en ${wslDistro}` : `Integración quitada de ${wslDistro}`,
+      );
+    } catch (e) {
+      notify("error", String(e));
+    }
+    wslIntegBusy = false;
   }
 
   async function applyWsl() {
@@ -54,9 +97,11 @@
       memoryMb = n;
     }
     if (
-      !confirm(
-        "Esto reiniciará WSL: apaga y enciende el motor (afecta a todas tus distros WSL). ¿Continuar?",
-      )
+      !(await askConfirm({
+        title: "Reiniciar WSL",
+        message:
+          "Esto reiniciará WSL: apaga y enciende el motor (afecta a todas tus distros WSL). ¿Continuar?",
+      }))
     ) {
       return;
     }
@@ -99,8 +144,19 @@
   }
 
   async function startUpdate() {
+    if (
+      !(await askConfirm({
+        title: "Actualizar el motor",
+        message:
+          "Se actualizarán Docker, BuildKit y Compose y luego se reiniciará el motor (los contenedores en ejecución se reiniciarán). ¿Continuar?",
+        confirmText: "Actualizar",
+      }))
+    )
+      return;
     showUpdate = true;
     updating = true;
+    updateDone = false;
+    updateOk = false;
     updateLines = [];
     updateUnlisten?.();
     updateUnlisten = await listen<{ line: string; stream: string }>("engine-update", (e) => {
@@ -110,13 +166,16 @@
     });
     try {
       const code = await api.engineUpdate();
+      updateOk = code === 0;
       if (code === 0) notify("success", "Motor actualizado");
       else notify("error", `La actualización terminó con código ${code}`);
       engine.set(await api.engineStatus());
     } catch (e) {
+      updateOk = false;
       notify("error", String(e));
     }
     updating = false;
+    updateDone = true;
   }
 </script>
 
@@ -186,14 +245,48 @@
   </div>
 </div>
 
+<div class="card" style="margin-top:14px">
+  <div class="label" style="margin-bottom:12px">Integración con WSL (experimental)</div>
+  {#if wslDistros.length}
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin:0">
+        <label for="wsldistro">Distro</label>
+        <select id="wsldistro" bind:value={wslDistro} onchange={checkIntegration} style="min-width:200px">
+          {#each wslDistros as d (d)}<option value={d}>{d}</option>{/each}
+        </select>
+      </div>
+      <button class="btn {wslIntegOn ? 'ok' : 'primary'}" onclick={toggleIntegration} disabled={wslIntegBusy}>
+        {#if wslIntegBusy}<span class="spinner"></span>{/if}
+        {wslIntegOn ? "✓ Integrada — quitar" : "Activar docker en esta distro"}
+      </button>
+    </div>
+  {:else}
+    <div style="color:var(--faint);font-size:13px">No se detectaron otras distros WSL.</div>
+  {/if}
+  <div style="color:var(--faint);font-size:12px;margin-top:8px">
+    Hace que <code>docker</code> / <code>docker compose</code> funcionen <b>dentro</b> de esa distro WSL,
+    reenviando al motor de LiteDock — útil para scripts que ejecutan <code>docker</code> desde WSL (como tu readycheck).
+    Instala unos shims en <code>/usr/local/bin</code> de la distro; "quitar" los elimina.
+  </div>
+</div>
+
 {#if showUpdate}
   <Modal title="Actualizar el motor" onClose={() => { if (!updating) showUpdate = false; }}>
-    <p style="color:var(--muted);margin-top:0">
-      Actualizando Docker, BuildKit y Compose a la última versión disponible y reiniciando el motor…
-    </p>
+    <div style="display:flex;align-items:center;gap:10px;margin:0 0 12px;font-size:14px;color:{updating ? 'var(--muted)' : updateOk ? 'var(--ok)' : '#e5484d'}">
+      {#if updating}
+        <span class="spinner"></span>
+        <span>Actualizando Docker, BuildKit y Compose, y reiniciando el motor…</span>
+      {:else if updateDone && updateOk}
+        <b style="font-size:16px">✓</b>
+        <span>Motor actualizado{$engine.version ? ` · v${$engine.version}` : ""}.</span>
+      {:else if updateDone}
+        <b style="font-size:16px">✕</b>
+        <span>La actualización no se completó. Revisa el detalle de abajo.</span>
+      {/if}
+    </div>
     <div style="height:40vh"><LogConsole lines={updateLines} placeholder="Iniciando…" /></div>
     {#snippet footer()}
-      <button class="btn" onclick={() => (showUpdate = false)} disabled={updating}>
+      <button class="btn {updateDone && updateOk ? 'primary' : ''}" onclick={() => (showUpdate = false)} disabled={updating}>
         {updating ? "Trabajando…" : "Cerrar"}
       </button>
     {/snippet}

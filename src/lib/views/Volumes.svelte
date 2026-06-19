@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../api";
-  import { guard, notify, copyText } from "../stores";
+  import { guard, notify, copyText, askConfirm } from "../stores";
   import type { Volume } from "../types";
   import Modal from "../components/Modal.svelte";
   import { wslPath } from "../format";
@@ -33,9 +33,11 @@
     }
   }
   async function remove(v: Volume) {
+    if (!(await askConfirm({ message: `¿Eliminar el volumen "${v.name}"? Se perderán sus datos.` }))) return;
     if (await guard(() => api.removeVolume(v.name, true), "Volumen eliminado")) load();
   }
   async function prune() {
+    if (!(await askConfirm({ message: "¿Eliminar todos los volúmenes sin usar?" }))) return;
     if (await guard(() => api.pruneVolumes(), "Volúmenes sin usar eliminados")) load();
   }
   async function inspect(v: Volume) {

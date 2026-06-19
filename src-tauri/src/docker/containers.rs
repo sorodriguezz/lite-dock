@@ -451,9 +451,42 @@ pub async fn upload_file(
     }
 }
 
+/// Split "repo[:tag]" into (repo, tag), defaulting tag to "latest" and not
+/// mistaking a registry port (e.g. localhost:5000/img) for a tag.
+fn split_image_tag(image: &str) -> (String, String) {
+    match image.rsplit_once(':') {
+        Some((repo, tag)) if !tag.contains('/') => (repo.to_string(), tag.to_string()),
+        _ => (image.to_string(), "latest".to_string()),
+    }
+}
+
+/// Ensure `image` exists locally, pulling it when `force` is set or it's missing
+/// — so creating a container "just works" even for an image you haven't pulled.
+async fn ensure_image(docker: &Docker, image: &str, force: bool) -> AppResult<()> {
+    use bollard::image::CreateImageOptions;
+    use futures_util::StreamExt;
+
+    if !force && docker.inspect_image(image).await.is_ok() {
+        return Ok(());
+    }
+    let (from_image, tag) = split_image_tag(image);
+    let opts = CreateImageOptions::<String> {
+        from_image,
+        tag,
+        ..Default::default()
+    };
+    let stream = docker.create_image(Some(opts), None, None);
+    futures_util::pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+        item?; // surface auth / network / not-found errors
+    }
+    Ok(())
+}
+
 /// Create a container from `image` with the given settings, then start it.
 /// `ports` are "host:container[/proto]", `env` are "KEY=VALUE", `volumes` are
-/// "source:/dest". Returns the new container id.
+/// "source:/dest". The image is pulled first when `pull` is set (or it's missing).
+/// Returns the new container id.
 pub async fn create_and_start(
     docker: &Docker,
     image: &str,
@@ -462,10 +495,14 @@ pub async fn create_and_start(
     env: &[String],
     volumes: &[String],
     restart: &str,
+    pull: bool,
+    publish_all: bool,
 ) -> AppResult<String> {
     use bollard::container::{Config, CreateContainerOptions};
     use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
     use std::collections::HashMap;
+
+    ensure_image(docker, image, pull).await?;
 
     let mut exposed: HashMap<String, HashMap<(), ()>> = HashMap::new();
     let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
@@ -512,6 +549,7 @@ pub async fn create_and_start(
 
     let host_config = HostConfig {
         port_bindings: if bindings.is_empty() { None } else { Some(bindings) },
+        publish_all_ports: if publish_all { Some(true) } else { None },
         binds: if volumes.is_empty() { None } else { Some(volumes.to_vec()) },
         restart_policy: Some(restart_policy),
         ..Default::default()

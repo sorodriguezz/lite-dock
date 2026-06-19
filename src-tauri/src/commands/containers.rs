@@ -291,6 +291,7 @@ pub async fn container_upload(
 
 /// Create + start a container from an image (Portainer-style run form).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_container(
     state: State<'_, AppState>,
     image: String,
@@ -299,7 +300,20 @@ pub async fn run_container(
     env: Vec<String>,
     volumes: Vec<String>,
     restart: String,
+    pull: bool,
+    publish_all: bool,
 ) -> AppResult<String> {
     let docker = state.docker().await?;
-    c::create_and_start(&docker, &image, name.as_deref(), &ports, &env, &volumes, &restart).await
+    c::create_and_start(
+        &docker,
+        &image,
+        name.as_deref(),
+        &ports,
+        &env,
+        &volumes,
+        &restart,
+        pull,
+        publish_all,
+    )
+    .await
 }

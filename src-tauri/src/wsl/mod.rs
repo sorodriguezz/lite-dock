@@ -340,3 +340,108 @@ pub fn write_wsl_config(memory_mb: Option<u32>, auto_reclaim: bool) -> AppResult
 pub async fn shutdown_all() {
     let _ = command("wsl.exe").args(["--shutdown"]).status().await;
 }
+
+// ─────────────────────── WSL integration (Docker Desktop-style) ───────────────────────
+
+/// Minimal base64 (so a shell script can be transported as one quote-free arg
+/// through `wsl.exe`, then decoded inside the distro — avoids Windows arg-quoting
+/// mangling the script's quotes/newlines).
+fn b64(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(T[(b0 >> 2) as usize] as char);
+        out.push(T[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Run a (possibly multi-line) shell script inside `distro` as root, transported
+/// base64-encoded so quoting survives the trip through wsl.exe.
+async fn run_in_distro(distro: &str, script: &str) -> AppResult<(bool, String, String)> {
+    let cmd = format!("echo {} | base64 -d | sh", b64(script.as_bytes()));
+    run_wsl(&["-d", distro, "-u", "root", "--", "sh", "-c", cmd.as_str()]).await
+}
+
+/// List the user's WSL distros that can host the integration (excludes our engine
+/// and Docker Desktop's internal distros).
+pub async fn list_distros() -> Vec<String> {
+    let skip = ["litedock-engine", "docker-desktop", "docker-desktop-data"];
+    match run_wsl(&["--list", "--quiet"]).await {
+        Ok((_ok, out, _)) => out
+            .lines()
+            .map(|l| {
+                l.trim()
+                    .trim_matches(|c| c == '\r' || c == '\u{0}')
+                    .trim()
+                    .to_string()
+            })
+            .filter(|l| !l.is_empty() && !skip.contains(&l.as_str()))
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// True if our `docker` shim is installed in `distro`.
+pub async fn integration_status(distro: &str) -> bool {
+    match run_in_distro(
+        distro,
+        "grep -q litedock-engine /usr/local/bin/docker 2>/dev/null && echo yes || echo no",
+    )
+    .await
+    {
+        Ok((_ok, out, _)) => out.contains("yes"),
+        Err(_) => false,
+    }
+}
+
+/// Install `docker` + `docker-compose` shims in `distro` that forward to the
+/// litedock-engine (so `docker` works inside that distro, like Docker Desktop's
+/// WSL integration). Remove with `integration_disable`.
+pub async fn integration_enable(distro: &str) -> AppResult<()> {
+    let engine = crate::config::DISTRO_NAME;
+    // printf with single-quoted args keeps `"$@"` literal in the shim file.
+    let script = format!(
+        "mkdir -p /usr/local/bin\n\
+printf '%s\\n' '#!/bin/sh' 'exec wsl.exe -d {engine} -u root -- docker \"$@\"' > /usr/local/bin/docker\n\
+printf '%s\\n' '#!/bin/sh' 'exec wsl.exe -d {engine} -u root -- docker compose \"$@\"' > /usr/local/bin/docker-compose\n\
+chmod +x /usr/local/bin/docker /usr/local/bin/docker-compose"
+    );
+    let (ok, _o, err) = run_in_distro(distro, &script).await?;
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::other(format!(
+            "no se pudo activar la integración en {distro}: {err}"
+        )))
+    }
+}
+
+/// Remove the LiteDock docker shims from `distro`.
+pub async fn integration_disable(distro: &str) -> AppResult<()> {
+    let (ok, _o, err) = run_in_distro(
+        distro,
+        "rm -f /usr/local/bin/docker /usr/local/bin/docker-compose",
+    )
+    .await?;
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::other(format!(
+            "no se pudo quitar la integración en {distro}: {err}"
+        )))
+    }
+}
