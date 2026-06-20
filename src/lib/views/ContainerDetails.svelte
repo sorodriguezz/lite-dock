@@ -33,19 +33,22 @@
   let execUnlisten: UnlistenFn | undefined;
   let execExitUnlisten: UnlistenFn | undefined;
 
+  const STATS_MS = 1500; // sample interval for the live graphs
+  const STATS_S = STATS_MS / 1000;
   let stats = $state<Stats | null>(null);
   let statsTimer: ReturnType<typeof setInterval> | undefined;
   let cpuHist = $state<number[]>([]);
-  let memHist = $state<number[]>([]);
+  let memHist = $state<number[]>([]); // bytes used → the graph auto-scales to real usage
   let netHist = $state<number[]>([]);
   let diskHist = $state<number[]>([]);
   let prevNet: number | null = null;
   let prevDisk: number | null = null;
-  // Latest + peak throughput (bytes/s) over the window, for the graph labels.
-  let netRate = $derived(netHist.length ? netHist[netHist.length - 1] / 2.5 : 0);
-  let diskRate = $derived(diskHist.length ? diskHist[diskHist.length - 1] / 2.5 : 0);
-  let netPeak = $derived(netHist.length ? Math.max(...netHist) / 2.5 : 0);
-  let diskPeak = $derived(diskHist.length ? Math.max(...diskHist) / 2.5 : 0);
+  // Peak memory, for the graph axis label when the container has no memory limit.
+  let memPeak = $derived(memHist.length ? Math.max(...memHist) : 0);
+  let netRate = $derived(netHist.length ? netHist[netHist.length - 1] / STATS_S : 0);
+  let diskRate = $derived(diskHist.length ? diskHist[diskHist.length - 1] / STATS_S : 0);
+  let netPeak = $derived(netHist.length ? Math.max(...netHist) / STATS_S : 0);
+  let diskPeak = $derived(diskHist.length ? Math.max(...diskHist) / STATS_S : 0);
 
   // resource limits
   let memLimit = $state("");
@@ -155,7 +158,7 @@
         stats = s;
         // Keep rolling windows for the live graphs (net/disk plot per-tick rate).
         cpuHist = [...cpuHist, s.cpu_percent].slice(-40);
-        memHist = [...memHist, s.mem_percent].slice(-40);
+        memHist = [...memHist, s.mem_usage].slice(-40);
         const netTotal = s.net_rx + s.net_tx;
         const diskTotal = s.blk_read + s.blk_write;
         if (prevNet !== null) netHist = [...netHist, Math.max(0, netTotal - prevNet)].slice(-40);
@@ -167,7 +170,7 @@
       }
     };
     tick();
-    statsTimer = setInterval(tick, 2500);
+    statsTimer = setInterval(tick, STATS_MS);
   }
 
   async function applyLimits() {
@@ -332,14 +335,14 @@
           </div>
           <Sparkline
             data={memHist}
-            max={100}
+            max={stats.mem_limit || undefined}
             color="var(--accent-2)"
-            peakLabel={stats.mem_limit ? bytes(stats.mem_limit) : "100%"}
+            peakLabel={stats.mem_limit ? bytes(stats.mem_limit) : bytes(memPeak)}
             spanLabel="~100 s"
           />
         </div>
         <div class="card">
-          <div class="label">Red I/O</div>
+          <div class="label"><span class="card-ic"><Icon name="network" size={14} /></span> Red I/O</div>
           <div class="value" style="font-size:17px">{bytes(netRate)}<small>/s</small></div>
           <div style="color:var(--faint);font-size:11.5px;margin-top:2px">
             ↓ {bytes(stats.net_rx)} · ↑ {bytes(stats.net_tx)} totales
@@ -347,7 +350,7 @@
           <Sparkline data={netHist} color="var(--ok)" peakLabel={bytes(netPeak) + "/s"} spanLabel="~100 s" />
         </div>
         <div class="card">
-          <div class="label">Disco I/O</div>
+          <div class="label"><span class="card-ic"><Icon name="disk" size={14} /></span> Disco I/O</div>
           <div class="value" style="font-size:17px">{bytes(diskRate)}<small>/s</small></div>
           <div style="color:var(--faint);font-size:11.5px;margin-top:2px">
             {bytes(stats.blk_read)} lect · {bytes(stats.blk_write)} escr

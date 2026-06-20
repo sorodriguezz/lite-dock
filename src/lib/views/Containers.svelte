@@ -105,10 +105,13 @@
     await act(fn, msg);
   }
   function ports(c: Container): string {
-    return c.ports
-      .filter((p) => p.public_port)
-      .map((p) => `${p.public_port}:${p.private_port}/${p.type}`)
-      .join(", ");
+    // Docker lists the IPv4 and IPv6 mappings separately; they render identically,
+    // so dedupe to avoid showing "5432:5432/tcp, 5432:5432/tcp".
+    const seen = new Set<string>();
+    for (const p of c.ports) {
+      if (p.public_port) seen.add(`${p.public_port}:${p.private_port}/${p.type}`);
+    }
+    return [...seen].join(", ");
   }
 
   // ── multi-select delete ──
@@ -221,8 +224,10 @@
       <input type="checkbox" checked={!!sel[c.id]} onchange={() => toggleSel(c.id)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" />
     </td>
     <td class={inGroup ? "indent" : ""}>
-      <span style="color:{stateColor(c.state)};display:inline-flex;vertical-align:-3px;margin-right:8px" title={c.state}><Icon name="container" size={15} /></span>
-      <span class="badge {c.state}"><span class="b-dot"></span>{c.state}</span>
+      <span style="display:inline-flex;align-items:center;gap:8px;color:{stateColor(c.state)}" title={c.state}>
+        <Icon name="container" size={15} />
+        <span class="badge {c.state}"><span class="b-dot"></span>{c.state}</span>
+      </span>
     </td>
     <td>
       <b>{c.name}</b>

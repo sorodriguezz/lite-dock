@@ -23,7 +23,7 @@
 
   let geom = $derived.by(() => {
     if (data.length < 2) return { line: "", area: "" };
-    const m = max ?? Math.max(1, ...data);
+    const m = max ?? Math.max(1, ...data) * 1.1;
     const stepX = W / (data.length - 1);
     const pts = data.map((v, i) => {
       const x = i * stepX;

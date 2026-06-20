@@ -69,7 +69,7 @@
     </svg>
     <div>
       <b>LiteDock</b><br />
-      <span>v1.2.0</span>
+      <span>v1.2.1</span>
     </div>
   </div>
 
