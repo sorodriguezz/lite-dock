@@ -4,8 +4,15 @@
 ; - Install: auto-set DOCKER_HOST to LiteDock's proxy (+ put the bundled docker
 ;   CLI on PATH if it was fetched before building). Steps shown via DetailPrint.
 ; - Uninstall: force-close the tray app + stop the engine, and undo the docker
-;   CLI integration. The engine distro and its data are KEPT (remove manually
-;   with `wsl --unregister litedock-engine` if you want a full wipe).
+;   CLI integration (DOCKER_HOST, the PATH entry, and the compose plugin). Then
+;   it ASKS whether to also wipe EVERYTHING LiteDock created. Default is "No"
+;   (keep the engine + data → instant reinstall). "Yes" leaves no residue:
+;     · wsl --unregister litedock-engine        (distro + the imported VHD)
+;     · %LOCALAPPDATA%\LiteDock\engine           (engine data dir)
+;     · %LOCALAPPDATA%\com.litedock.desktop      (WebView2 / app cache)
+;     · docker shims in your other WSL distros   (/usr/local/bin/docker, …)
+;   The shared %USERPROFILE%\.wslconfig is left untouched (it may hold settings
+;   for your other distros); remove its memory= line by hand if you want.
 ;
 ; The heavy WSL2 enablement + engine import happens in the in-app First-Run
 ; Wizard, not here.
@@ -57,16 +64,45 @@
   DetailPrint "Deteniendo el motor (WSL: litedock-engine)…"
   nsExec::Exec 'wsl.exe --terminate litedock-engine'
 
-  ; Undo the optional docker-CLI integration we may have set up. The engine
-  ; distro and its data (your containers/images/volumes) are intentionally KEPT,
-  ; so reinstalling is instant and nothing is destroyed without your say-so.
-  ; To wipe the engine completely:  wsl --unregister litedock-engine
+  ; ── Always undo the docker-CLI integration we may have set up ──
   DetailPrint "Quitando la conexión de docker (DOCKER_HOST)…"
   DeleteRegValue HKCU "Environment" "DOCKER_HOST"
   Delete "$PROFILE\.docker\cli-plugins\docker-compose.exe"
+  ; Remove the docker-cli folder we appended to the user PATH on install (no-op if
+  ; the all-in-one CLI was never bundled). Uses .NET inline so there are no extra
+  ; PATH leftovers pointing at the now-deleted install dir.
+  DetailPrint "Limpiando el PATH (docker-cli)…"
+  nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('Path', ([Environment]::GetEnvironmentVariable('Path','User') -replace [regex]::Escape(';$INSTDIR\resources\docker-cli'),''), 'User')"`
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=2000
-  DetailPrint "Se conservan el motor y tus datos (contenedores, imagenes, volumenes)."
-  DetailPrint "Para borrarlos por completo: wsl --unregister litedock-engine"
+
+  ; ── Ask whether to also wipe the engine distro + ALL its data ──
+  ; Default (and silent-mode default via /SD) is NO, so data is never destroyed
+  ; unless the user explicitly opts in. "Yes" removes the WSL distro and the
+  ; imported VHD with every container/image/volume LiteDock created.
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "¿Borrar también el motor de LiteDock y TODOS sus datos? Se eliminará la distro WSL 'litedock-engine' con todos tus contenedores, imágenes y volúmenes de LiteDock. Esto NO se puede deshacer.$\n$\nElige No para conservarlos (una reinstalación los reutiliza)." /SD IDNO IDYES litedock_wipe
+    DetailPrint "Se conservan el motor y tus datos (contenedores, imagenes, volumenes)."
+    DetailPrint "Para borrarlos luego: wsl --unregister litedock-engine"
+    Goto litedock_done
+  litedock_wipe:
+    DetailPrint "Borrando el motor (wsl --unregister litedock-engine)…"
+    nsExec::Exec 'wsl.exe --unregister litedock-engine'
+    ; Remove the docker shims LiteDock may have installed inside your OTHER WSL
+    ; distros (the Docker Desktop-style integration). Best-effort: it skips our
+    ; own engine + Docker Desktop's distros and only deletes LiteDock's own paths,
+    ; mirroring wsl::integration_disable(). `$$` is NSIS-escaping for a literal `$`
+    ; so PowerShell — not NSIS — sees the $d / $_ variables.
+    DetailPrint "Quitando los shims de docker de tus otras distros WSL…"
+    nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Console]::OutputEncoding=[Text.Encoding]::Unicode; (wsl.exe --list --quiet) | ForEach-Object { $$d = $$_.Trim(); if ($$d -and $$d -ne 'litedock-engine' -and $$d -ne 'docker-desktop' -and $$d -ne 'docker-desktop-data') { wsl.exe -d $$d -u root -- rm -rf /usr/local/bin/docker /usr/local/bin/docker-compose /usr/local/lib/litedock /etc/profile.d/zz-litedock.sh } }"`
+    DetailPrint "Borrando los datos del motor (%LOCALAPPDATA%\LiteDock\engine)…"
+    RMDir /r "$LOCALAPPDATA\LiteDock\engine"
+    ; Remove the now-empty parent only if nothing else lives there (RMDir without
+    ; /r is a no-op if the folder still has files, e.g. when it is the install dir).
+    RMDir "$LOCALAPPDATA\LiteDock"
+    ; WebView2 / app cache Tauri creates under the bundle identifier.
+    DetailPrint "Borrando la caché de la app (WebView2)…"
+    RMDir /r "$LOCALAPPDATA\com.litedock.desktop"
+    DetailPrint "Motor, integraciones y datos de LiteDock eliminados por completo."
+  litedock_done:
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

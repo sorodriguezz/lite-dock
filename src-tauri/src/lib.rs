@@ -64,6 +64,8 @@ pub fn run() {
             commands::containers::container_browse,
             commands::containers::container_delete_path,
             commands::containers::container_upload,
+            commands::containers::container_download,
+            commands::containers::write_host_file,
             commands::containers::run_container,
             // ── images ────────────────────────────────────────────────────
             commands::images::list_images,

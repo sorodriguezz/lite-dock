@@ -379,6 +379,28 @@ pub async fn delete_path(docker: &Docker, id: &str, path: &str) -> AppResult<()>
     }
 }
 
+/// Read a file (or a directory, as a tar) from the container, base64-encoded so
+/// binary content survives the exec capture. Same philosophy as browse/upload:
+/// just shell + base64 inside the container, no tar crate / download API / deps.
+pub async fn download(docker: &Docker, id: &str, path: &str, is_dir: bool) -> AppResult<String> {
+    let cmd = if is_dir {
+        let p = path.trim_end_matches('/');
+        let (parent, name): (&str, &str) = match p.rfind('/') {
+            Some(0) => ("/", &p[1..]),
+            Some(i) => (&p[..i], &p[i + 1..]),
+            None => (".", p),
+        };
+        format!(
+            "cd {} 2>/dev/null && tar -cf - {} 2>/dev/null | base64",
+            sh_quote(parent),
+            sh_quote(name)
+        )
+    } else {
+        format!("base64 < {} 2>/dev/null", sh_quote(path))
+    };
+    exec_capture(docker, id, vec!["sh".into(), "-lc".into(), cmd]).await
+}
+
 /// Upload a Windows host file into `dest_dir` inside the container by streaming
 /// its bytes to `cat > <dest>` over an exec — no tar archive or extra deps.
 pub async fn upload_file(

@@ -27,6 +27,23 @@
     loading = false;
   }
 
+  // Silent refresh for the live poll (no spinner) so states update in real time.
+  async function refresh() {
+    try {
+      items = await api.listContainers();
+    } catch {
+      /* ignore transient errors */
+    }
+  }
+
+  // Left-accent colour for a container row, by state.
+  function stateColor(s: string): string {
+    if (s === "running") return "var(--ok)";
+    if (s === "exited" || s === "dead") return "var(--danger)";
+    if (s === "paused" || s === "created" || s === "restarting") return "var(--warn)";
+    return "var(--faint)";
+  }
+
   async function pollStats() {
     const running = items.filter((c) => c.state === "running");
     await Promise.allSettled(
@@ -43,7 +60,11 @@
 
   onMount(() => {
     load().then(pollStats);
-    statsTimer = setInterval(pollStats, 5000);
+    // Poll the list + stats so state changes (running → exited, etc.) show live.
+    statsTimer = setInterval(async () => {
+      await refresh();
+      await pollStats();
+    }, 2500);
     return () => clearInterval(statsTimer);
   });
 
@@ -172,7 +193,7 @@
             <td colspan="8">
               <div class="group-head">
                 <span class="group-chev {collapsed[proj] ? '' : 'open'}">▸</span>
-                <span style="color:var(--accent);display:inline-flex"><Icon name="container" size={15} /></span>
+                <span style="color:var(--accent);display:inline-flex"><Icon name="layers" size={15} /></span>
                 <b>{proj}</b>
                 <span class="group-count">
                   {list.length} {list.length === 1 ? "servicio" : "servicios"} · compose
@@ -196,10 +217,11 @@
 
 {#snippet row(c: Container, inGroup: boolean)}
   <tr onclick={() => (selected = c)} style="cursor:pointer">
-    <td style="text-align:center" onclick={(e) => e.stopPropagation()}>
+    <td style="text-align:center;box-shadow:inset 4px 0 0 {stateColor(c.state)}" onclick={(e) => e.stopPropagation()}>
       <input type="checkbox" checked={!!sel[c.id]} onchange={() => toggleSel(c.id)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" />
     </td>
     <td class={inGroup ? "indent" : ""}>
+      <span style="color:{stateColor(c.state)};display:inline-flex;vertical-align:-3px;margin-right:8px" title={c.state}><Icon name="container" size={15} /></span>
       <span class="badge {c.state}"><span class="b-dot"></span>{c.state}</span>
     </td>
     <td>

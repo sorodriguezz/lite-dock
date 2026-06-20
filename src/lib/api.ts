@@ -74,6 +74,10 @@ export const api = {
     invoke<void>("container_delete_path", { id, path }),
   containerUpload: (id: string, destDir: string, hostPath: string) =>
     invoke<void>("container_upload", { id, destDir, hostPath }),
+  containerDownload: (id: string, path: string, isDir: boolean) =>
+    invoke<string>("container_download", { id, path, isDir }),
+  writeHostFile: (path: string, data: number[]) =>
+    invoke<void>("write_host_file", { path, data }),
   runContainer: (p: {
     image: string;
     name?: string;

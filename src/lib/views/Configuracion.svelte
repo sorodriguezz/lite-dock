@@ -2,7 +2,6 @@
   import { onMount, onDestroy } from "svelte";
   import { engine, notify, askConfirm } from "../stores";
   import { api, listen, type UnlistenFn } from "../api";
-  import { stripAnsi } from "../format";
   import Modal from "../components/Modal.svelte";
   import LogConsole from "../components/LogConsole.svelte";
   import Icon from "../components/Icon.svelte";
@@ -161,7 +160,7 @@
     updateUnlisten?.();
     updateUnlisten = await listen<{ line: string; stream: string }>("engine-update", (e) => {
       if (!e.payload.line.startsWith("__EXIT__")) {
-        updateLines = [...updateLines, stripAnsi(e.payload.line)].slice(-3000);
+        updateLines = [...updateLines, e.payload.line].slice(-3000);
       }
     });
     try {

@@ -2,10 +2,12 @@
   import { onMount } from "svelte";
   import Modal from "../components/Modal.svelte";
   import LogConsole from "../components/LogConsole.svelte";
+  import XTerm from "../components/XTerm.svelte";
   import { api, listen, type UnlistenFn } from "../api";
   import { notify, askConfirm } from "../stores";
   import type { Container, FileEntry, Stats } from "../types";
-  import { stripAnsi, bytes } from "../format";
+  import { bytes } from "../format";
+  import { makeZip, parseTar, b64ToBytes, type ArchiveFile } from "../archive";
   import { open } from "@tauri-apps/plugin-dialog";
   import Sparkline from "../components/Sparkline.svelte";
   import Icon from "../components/Icon.svelte";
@@ -24,9 +26,10 @@
   let logLines = $state<string[]>([]);
   let logUnlisten: UnlistenFn | undefined;
 
+  type XTermApi = { write: (s: string) => void; clear: () => void; reset: () => void; focus: () => void };
   let session = $state<string | null>(null);
-  let termLines = $state<string[]>([]);
-  let termInput = $state("");
+  let xterm = $state<XTermApi>();
+  let termPending = $state<string[]>([]);
   let execUnlisten: UnlistenFn | undefined;
   let execExitUnlisten: UnlistenFn | undefined;
 
@@ -54,6 +57,9 @@
   let browseEntries = $state<FileEntry[]>([]);
   let browseLoading = $state(false);
   let uploading = $state(false);
+  let sel = $state<Record<string, boolean>>({});
+  let downloading = $state(false);
+  let selectedEntries = $derived(browseEntries.filter((f) => sel[f.name]));
 
   onMount(() => {
     startLogs();
@@ -94,7 +100,7 @@
     logLines = [];
     logUnlisten = await listen<{ id: string; line: string }>("container-log", (e) => {
       if (e.payload.id === container.id) {
-        logLines = [...logLines, stripAnsi(e.payload.line)].slice(-2000);
+        logLines = [...logLines, e.payload.line].slice(-2000);
       }
     });
     try {
@@ -105,42 +111,42 @@
   }
 
   async function startTerminal() {
-    termLines = [];
+    termPending = [];
+    xterm?.reset();
     execUnlisten = await listen<{ session: string; line: string }>("exec-output", (e) => {
-      if (e.payload.session === session) {
-        termLines = [...termLines, stripAnsi(e.payload.line)].slice(-2000);
-      }
+      if (e.payload.session === session) termWrite(e.payload.line);
     });
     execExitUnlisten = await listen<string>("exec-exit", (e) => {
       if (e.payload === session) {
-        termLines = [...termLines, "\n[sesión finalizada]"];
+        termWrite("\r\n\x1b[2m[sesión finalizada]\x1b[0m\r\n");
         session = null;
       }
     });
     try {
       session = await api.execStart(container.id, ["/bin/sh"]);
+      xterm?.focus();
     } catch (e) {
       notify("error", String(e));
     }
   }
 
-  async function sendInput(e: Event) {
-    e.preventDefault();
-    if (!session) return;
-    // `clear`/`cls` emit ANSI escapes that stripAnsi removes, so the buffer
-    // never clears. Clear it locally; the shell still prints a fresh prompt.
-    const cmd = termInput.trim().toLowerCase();
-    if (cmd === "clear" || cmd === "cls") {
-      termLines = [];
-    }
-    const data = termInput + "\n";
-    termInput = "";
-    try {
-      await api.execWrite(session, data);
-    } catch (err) {
-      notify("error", String(err));
-    }
+  // xterm forwards every keystroke raw to the shell — Ctrl+C, arrows (the shell's
+  // own history), clear, vim/nano, top… all handled natively by the real shell.
+  function termWrite(s: string) {
+    if (xterm) xterm.write(s);
+    else termPending = [...termPending, s];
   }
+  function onTermData(d: string) {
+    if (session) api.execWrite(session, d).catch((e) => notify("error", String(e)));
+  }
+  // Flush output that arrived before xterm finished mounting.
+  $effect(() => {
+    if (xterm && termPending.length) {
+      const pending = termPending;
+      termPending = [];
+      for (const s of pending) xterm.write(s);
+    }
+  });
 
   function startStats() {
     const tick = async () => {
@@ -188,6 +194,7 @@
     try {
       browseEntries = await api.containerBrowse(container.id, path);
       browsePath = path;
+      sel = {};
     } catch (e) {
       notify("error", String(e));
     }
@@ -235,6 +242,53 @@
     uploading = false;
   }
 
+  // Join a Windows destination dir with a filename.
+  function joinHost(dir: string, name: string): string {
+    const sep = dir.includes("\\") || !dir.includes("/") ? "\\" : "/";
+    return dir.replace(/[\\/]+$/, "") + sep + name;
+  }
+  async function downloadSel() {
+    const items = selectedEntries;
+    if (!items.length) return;
+    const destDir = await open({ directory: true, title: "Carpeta de destino para la descarga" });
+    if (typeof destDir !== "string") return;
+    downloading = true;
+    try {
+      const base = browsePath === "/" ? "" : browsePath.replace(/\/$/, "");
+      // A single plain file downloads as-is; a folder (or any multi-select) is zipped.
+      if (items.length === 1 && !items[0].is_dir) {
+        const b64 = await api.containerDownload(container.id, `${base}/${items[0].name}`, false);
+        await api.writeHostFile(joinHost(destDir, items[0].name), Array.from(b64ToBytes(b64)));
+        notify("success", `Descargado: ${items[0].name}`);
+      } else {
+        const entries: ArchiveFile[] = [];
+        for (const it of items) {
+          const b64 = await api.containerDownload(container.id, `${base}/${it.name}`, it.is_dir);
+          const bytes = b64ToBytes(b64);
+          if (it.is_dir) {
+            const parsed = parseTar(bytes);
+            // An empty folder yields no files — keep it as a directory entry so
+            // the download still works instead of erroring out.
+            if (parsed.length) entries.push(...parsed);
+            else entries.push({ name: it.name + "/", data: new Uint8Array(0), dir: true });
+          } else {
+            entries.push({ name: it.name, data: bytes });
+          }
+        }
+        const zip = makeZip(entries);
+        const zipName =
+          (items.length === 1 && items[0].is_dir ? items[0].name : `${container.name}_descarga`) + ".zip";
+        await api.writeHostFile(joinHost(destDir, zipName), Array.from(zip));
+        const n = entries.filter((e) => !e.dir).length;
+        notify("success", `Descargado: ${zipName} (${n} archivo${n === 1 ? "" : "s"})`);
+      }
+      sel = {};
+    } catch (e) {
+      notify("error", String(e));
+    }
+    downloading = false;
+  }
+
   function stopAll() {
     logUnlisten?.();
     execUnlisten?.();
@@ -257,11 +311,12 @@
   {#if tab === "logs"}
     <div style="height:46vh"><LogConsole lines={logLines} placeholder="Esperando logs…" /></div>
   {:else if tab === "terminal"}
-    <div style="height:40vh"><LogConsole lines={termLines} placeholder="Iniciando shell…" /></div>
-    <form onsubmit={sendInput} style="margin-top:10px;display:flex;gap:8px">
-      <input type="text" class="mono" placeholder="Comando + Enter…" bind:value={termInput} />
-      <button class="btn" type="submit" disabled={!session}>Enviar</button>
-    </form>
+    <div style="height:440px">
+      <XTerm bind:this={xterm} ondata={onTermData} />
+    </div>
+    <div style="color:var(--faint);font-size:12px;margin-top:8px">
+      Terminal interactiva — funcionan Ctrl+C, ↑/↓ (historial del shell), <code>top</code>/<code>htop</code>, <code>vim</code> y <code>nano</code>.
+    </div>
   {:else if tab === "stats"}
     {#if stats}
       <div class="grid stats-grid">
@@ -328,6 +383,11 @@
       <button class="btn" onclick={goUp} disabled={browsePath === "/"}>↑ Arriba</button>
       <span class="mono" style="color:var(--muted);user-select:text;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">{browsePath}</span>
       {#if browseLoading}<span class="spinner"></span>{/if}
+      {#if selectedEntries.length}
+        <button class="btn ok" onclick={downloadSel} disabled={downloading}>
+          {#if downloading}<span class="spinner"></span>{/if} Descargar ({selectedEntries.length})
+        </button>
+      {/if}
       <button class="btn primary" onclick={uploadHere} disabled={uploading}>
         {#if uploading}<span class="spinner"></span>{/if} Subir archivo
       </button>
@@ -338,6 +398,15 @@
       {/if}
       {#each browseEntries as f (f.name)}
         <div class="file-row {f.is_dir ? '' : 'file'}">
+          <label style="display:flex;align-items:center;padding:0 2px 0 12px;cursor:pointer">
+            <input
+              type="checkbox"
+              checked={!!sel[f.name]}
+              onchange={() => (sel = { ...sel, [f.name]: !sel[f.name] })}
+              style="cursor:pointer"
+              aria-label="Seleccionar {f.name}"
+            />
+          </label>
           {#if f.is_dir}
             <button class="file-main" onclick={() => enterDir(f.name)} title={f.name}>
               <span class="file-ic">📁</span>

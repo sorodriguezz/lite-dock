@@ -289,6 +289,26 @@ pub async fn container_upload(
     c::upload_file(&docker, &id, &dest_dir, &host_path).await
 }
 
+/// Read a file/dir from the container, returned base64-encoded (dir → tar).
+#[tauri::command]
+pub async fn container_download(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    is_dir: bool,
+) -> AppResult<String> {
+    let docker = state.docker().await?;
+    c::download(&docker, &id, &path, is_dir).await
+}
+
+/// Write raw bytes to a host path (used to save the files/zips the user downloads).
+#[tauri::command]
+pub async fn write_host_file(path: String, data: Vec<u8>) -> AppResult<()> {
+    std::fs::write(&path, &data)
+        .map_err(|e| AppError::other(format!("no se pudo guardar el archivo: {e}")))?;
+    Ok(())
+}
+
 /// Create + start a container from an image (Portainer-style run form).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
