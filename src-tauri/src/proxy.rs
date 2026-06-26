@@ -103,6 +103,19 @@ async fn pump_requests(
             && (first_line.contains("/containers/create")
                 || first_line.contains("/volumes/create"));
 
+        // Local bind volumes (`DriverOpts: { o: bind, device: <path> }`) are NOT
+        // auto-created by dockerd, so a Compose project that points at a missing
+        // host folder fails later at container start with
+        // "failed to populate volume … no such file or directory". Docker Desktop
+        // hides this by creating the directory; we do the same here, up front,
+        // for the external CLI. Best-effort: any failure is ignored so the
+        // request still forwards and surfaces the real error if needed.
+        if first_line.starts_with("POST ") && first_line.contains("/volumes/create") {
+            if let Some(dir) = bind_device_from_volume_body(&body) {
+                ensure_host_dir(&dir).await;
+            }
+        }
+
         if is_create {
             if let Some(new_body) = rewrite_body(&body) {
                 let new_head = set_content_length(&head_str, new_body.len());
@@ -190,6 +203,46 @@ fn set_content_length(head: &str, len: usize) -> String {
 }
 
 // ───────────────────────────── path rewriting ─────────────────────────────
+
+/// `mkdir -p <path>` inside the engine distro, as root. Best-effort: the result
+/// is ignored so volume creation is never blocked by this.
+async fn ensure_host_dir(path: &str) {
+    let _ = crate::wsl::run_wsl(&[
+        "-d",
+        crate::config::DISTRO_NAME,
+        "-u",
+        "root",
+        "--",
+        "mkdir",
+        "-p",
+        path,
+    ])
+    .await;
+}
+
+/// For a `POST /volumes/create` body, return the host directory that must exist
+/// when the volume is a `local` bind mount (`DriverOpts: { o: bind, device }`).
+/// The path is normalised to the engine's `/mnt/<drive>/…` form. Returns None
+/// for non-bind volumes or unparseable bodies.
+fn bind_device_from_volume_body(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let opts = v.get("DriverOpts")?;
+    let device = opts.get("device").and_then(|d| d.as_str())?;
+    let is_bind = opts
+        .get("o")
+        .and_then(|o| o.as_str())
+        .map(|s| s.contains("bind"))
+        .unwrap_or(false)
+        || opts
+            .get("type")
+            .and_then(|t| t.as_str())
+            .map(|s| s == "none")
+            .unwrap_or(false);
+    if !is_bind {
+        return None;
+    }
+    Some(win_to_mnt(device).unwrap_or_else(|| device.to_string()))
+}
 
 /// `C:\foo\bar` or `C:/foo` → `/mnt/c/foo/bar`. Returns None if not a Windows
 /// absolute path.
