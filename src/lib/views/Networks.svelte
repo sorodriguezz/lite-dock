@@ -8,7 +8,7 @@
   import Icon from "../components/Icon.svelte";
 
   let items = $state<Network[]>([]);
-  let loading = $state(false);
+  let loading = $state(true); // first load starts on mount; avoids flashing the empty state
   let showCreate = $state(false);
   let name = $state("");
   let driver = $state("bridge");
@@ -96,6 +96,7 @@
 <div class="page-head">
   <span class="ph-icon"><Icon name="network" /></span>
   <h2>Redes</h2>
+  <p class="page-sub">Redes que conectan tus contenedores</p>
   <span class="count">{items.length}</span>
   <div class="grow"></div>
   {#if selectedNames.length}
@@ -109,12 +110,19 @@
 </div>
 
 {#if items.length === 0}
-  <div class="empty"><div class="big">Sin redes</div></div>
+  <div class="empty">
+    {#if loading}
+      <span class="spinner"></span>
+    {:else}
+      <div class="big">No hay redes</div>
+      Usa “Crear red” para que tus contenedores se comuniquen entre sí.
+    {/if}
+  </div>
 {:else}
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Nombre</th><th>Driver</th><th>Scope</th><th>Contenedores</th><th></th></tr>
+        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Nombre</th><th>Controlador</th><th>Ámbito</th><th>Contenedores</th><th></th></tr>
       </thead>
       <tbody>
         {#each items as n (n.id)}
@@ -136,7 +144,7 @@
               <div class="cell-actions">
                 <button class="btn" onclick={() => inspect(n)}>Inspeccionar</button>
                 {#if !builtin(n.name)}
-                  <button class="btn icon danger" title="Eliminar" onclick={() => remove(n)}>🗑</button>
+                  <button class="btn icon danger" title="Eliminar" aria-label="Eliminar la red {n.name}" onclick={() => remove(n)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg></button>
                 {/if}
               </div>
             </td>
@@ -154,7 +162,7 @@
       <input id="nn" type="text" placeholder="p. ej. mi-red" bind:value={name} />
     </div>
     <div class="field">
-      <label for="nd">Driver</label>
+      <label for="nd">Controlador</label>
       <select id="nd" bind:value={driver}>
         <option value="bridge">bridge</option>
         <option value="macvlan">macvlan</option>

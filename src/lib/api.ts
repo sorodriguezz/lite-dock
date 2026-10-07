@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Container,
+  DiskUsage,
   EngineStatus,
   FileEntry,
   Image,
@@ -22,6 +23,8 @@ export const api = {
   engineStop: () => invoke<void>("engine_stop"),
   engineRestart: () => invoke<void>("engine_restart"),
   systemDf: () => invoke<unknown>("system_df"),
+  diskUsage: () => invoke<DiskUsage>("disk_usage"),
+  pruneBuildCache: () => invoke<number>("prune_build_cache"),
   engineLogs: () => invoke<string>("engine_logs"),
   enableDockerCli: () => invoke<string>("enable_docker_cli"),
   disableDockerCli: () => invoke<void>("disable_docker_cli"),
@@ -78,6 +81,9 @@ export const api = {
     invoke<string>("container_download", { id, path, isDir }),
   writeHostFile: (path: string, data: number[]) =>
     invoke<void>("write_host_file", { path, data }),
+  /** Copy ONE file from the container straight to a Windows path (no JS round-trip). */
+  containerDownloadToHost: (id: string, path: string, dest: string) =>
+    invoke<number>("container_download_to_host", { id, path, dest }),
   runContainer: (p: {
     image: string;
     name?: string;
@@ -87,6 +93,7 @@ export const api = {
     restart: string;
     pull: boolean;
     publishAll: boolean;
+    autoRemove?: boolean;
   }) => invoke<string>("run_container", p),
 
   // ── images ───────────────────────────────────────────────────────

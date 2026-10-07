@@ -45,6 +45,15 @@ pub fn engine_tcp_url() -> String {
     format!("tcp://{ENGINE_HOST}:{ENGINE_PROXY_PORT}")
 }
 
+/// `%LOCALAPPDATA%\LiteDock\wsl-integrations.json` — the WSL distros where
+/// LiteDock installed its `docker` shim, so startup repair only touches those.
+pub fn integrations_file() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    std::path::Path::new(&base)
+        .join("LiteDock")
+        .join("wsl-integrations.json")
+}
+
 /// `%LOCALAPPDATA%\LiteDock\engine` — where the distro is imported.
 /// Falls back to a temp dir if the env var is missing (should never happen on
 /// Windows).

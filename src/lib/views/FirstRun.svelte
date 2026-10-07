@@ -58,7 +58,7 @@
     try {
       status = await api.setupDetect();
     } catch (e) {
-      appendLog("detect: " + String(e));
+      appendLog("Error al comprobar: " + String(e));
     }
   }
 
@@ -183,22 +183,22 @@
     {/if}
 
     {#if failed}
-      <p class="setup-failed">No se pudo completar el arranque — revisa los logs del motor abajo.</p>
+      <p class="setup-failed">No se pudo completar el arranque — revisa el registro del motor abajo.</p>
     {/if}
 
     {#if logLines.length || failed}
       <div class="log-acc">
         <button class="log-acc-head" onclick={() => (logsOpen = !logsOpen)}>
           <span class="chev">{logsOpen ? "▾" : "▸"}</span>
-          Logs del motor
+          Registro del motor
           {#if failed}<span class="tag-error">error</span>{/if}
         </button>
         {#if logsOpen}
           <div style="height:30vh; margin-top:8px">
-            <LogConsole lines={logLines} placeholder="Sin logs todavía…" />
+            <LogConsole lines={logLines} placeholder="Sin registros todavía…" />
           </div>
           <div style="margin-top:6px">
-            <button class="btn" onclick={refreshLogs}>Refrescar logs</button>
+            <button class="btn" onclick={refreshLogs}>Refrescar registro</button>
           </div>
         {/if}
       </div>

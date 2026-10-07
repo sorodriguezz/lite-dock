@@ -258,8 +258,9 @@ fn win_to_mnt(s: &str) -> Option<String> {
     }
 }
 
-/// Rewrite the source of a legacy bind string `C:\src:/dst[:mode]`.
-fn rewrite_bind(s: &str) -> Option<String> {
+/// Rewrite the source of a legacy bind string `C:\src:/dst[:mode]`. Also used
+/// by the app's own "run container" form (`docker::containers`).
+pub(crate) fn rewrite_bind(s: &str) -> Option<String> {
     let b = s.as_bytes();
     if !(b.len() >= 3
         && b[0].is_ascii_alphabetic()

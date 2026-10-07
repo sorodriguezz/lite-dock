@@ -9,7 +9,7 @@
 use crate::error::{AppError, AppResult};
 use crate::{config, wsl};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 
 /// A single line of streamed CLI output.
 #[derive(serde::Serialize, Clone)]
@@ -62,7 +62,7 @@ pub async fn run_streaming(app: &AppHandle, event: &str, args: &[String]) -> App
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::other(format!("failed to spawn wsl.exe: {e}")))?;
+        .map_err(|e| AppError::other(format!("no se pudo iniciar wsl.exe: {e}")))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -71,8 +71,8 @@ pub async fn run_streaming(app: &AppHandle, event: &str, args: &[String]) -> App
     let ev_out = event.to_string();
     let out_task = tokio::spawn(async move {
         if let Some(out) = stdout {
-            let mut lines = BufReader::new(out).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (mut rd, mut buf) = (BufReader::new(out), Vec::new());
+            while let Some(line) = wsl::read_line_lossy(&mut rd, &mut buf).await {
                 let _ = app_out.emit(
                     &ev_out,
                     OutputLine {
@@ -88,8 +88,8 @@ pub async fn run_streaming(app: &AppHandle, event: &str, args: &[String]) -> App
     let ev_err = event.to_string();
     let err_task = tokio::spawn(async move {
         if let Some(err) = stderr {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (mut rd, mut buf) = (BufReader::new(err), Vec::new());
+            while let Some(line) = wsl::read_line_lossy(&mut rd, &mut buf).await {
                 // BuildKit writes its progress to stderr; surface it as output.
                 let _ = app_err.emit(
                     &ev_err,
@@ -105,7 +105,7 @@ pub async fn run_streaming(app: &AppHandle, event: &str, args: &[String]) -> App
     let status = child
         .wait()
         .await
-        .map_err(|e| AppError::other(format!("process error: {e}")))?;
+        .map_err(|e| AppError::other(format!("error del proceso: {e}")))?;
     let _ = out_task.await;
     let _ = err_task.await;
 

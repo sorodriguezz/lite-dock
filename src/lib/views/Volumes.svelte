@@ -8,7 +8,7 @@
   import Icon from "../components/Icon.svelte";
 
   let items = $state<Volume[]>([]);
-  let loading = $state(false);
+  let loading = $state(true); // first load starts on mount; avoids flashing the empty state
   let showCreate = $state(false);
   let name = $state("");
   let inspectJson = $state<string | null>(null);
@@ -77,8 +77,16 @@
     if (await guard(() => api.removeVolume(v.name, true), "Volumen eliminado")) load();
   }
   async function prune() {
-    if (!(await askConfirm({ message: "¿Eliminar todos los volúmenes sin usar?" }))) return;
-    if (await guard(() => api.pruneVolumes(), "Volúmenes sin usar eliminados")) load();
+    // Docker (API ≥ 1.42) only prunes ANONYMOUS volumes here; named ones are kept.
+    if (
+      !(await askConfirm({
+        title: "Limpiar volúmenes anónimos",
+        message:
+          "¿Eliminar los volúmenes anónimos que no usa ningún contenedor?\nLos volúmenes con nombre se conservan: bórralos uno a uno si ya no los necesitas.",
+      }))
+    )
+      return;
+    if (await guard(() => api.pruneVolumes(), "Volúmenes anónimos sin usar eliminados")) load();
   }
   async function inspect(v: Volume) {
     try {
@@ -100,25 +108,33 @@
 <div class="page-head">
   <span class="ph-icon"><Icon name="volume" /></span>
   <h2>Volúmenes</h2>
+  <p class="page-sub">Datos persistentes de tus contenedores</p>
   <span class="count">{items.length}</span>
   <div class="grow"></div>
   {#if selectedNames.length}
     <button class="btn danger" onclick={bulkRemove}>Eliminar seleccionados ({selectedNames.length})</button>
   {/if}
   <button class="btn primary" onclick={() => (showCreate = true)}>Crear volumen</button>
-  <button class="btn" onclick={prune}>Limpiar sin usar</button>
+  <button class="btn" onclick={prune} title="Elimina los volúmenes anónimos que no usa ningún contenedor">Limpiar anónimos</button>
   <button class="btn" onclick={load} disabled={loading}>
     {#if loading}<span class="spinner"></span>{/if} Actualizar
   </button>
 </div>
 
 {#if items.length === 0}
-  <div class="empty"><div class="big">Sin volúmenes</div>Crea uno para persistir datos.</div>
+  <div class="empty">
+    {#if loading}
+      <span class="spinner"></span>
+    {:else}
+      <div class="big">Aún no tienes volúmenes</div>
+      Usa “Crear volumen” para guardar datos que sobrevivan a tus contenedores.
+    {/if}
+  </div>
 {:else}
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Nombre</th><th>Driver</th><th>Ubicación (Windows)</th><th></th></tr>
+        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Nombre</th><th>Controlador</th><th>Ubicación (Windows)</th><th></th></tr>
       </thead>
       <tbody>
         {#each items as v (v.name)}

@@ -11,15 +11,18 @@
 
 {#if $confirmReq}
   {@const req = $confirmReq}
-  <Modal title={req.title} onClose={() => answer(false)}>
-    <p class="confirm-msg">{req.message}</p>
-    {#snippet footer()}
-      <button class="btn" onclick={() => answer(false)}>No</button>
-      <button class="btn {req.danger ? 'danger' : 'primary'}" onclick={() => answer(true)}>
-        {req.confirmText}
-      </button>
-    {/snippet}
-  </Modal>
+  {#key req.id}
+    <Modal title={req.title} onClose={() => answer(false)} closeOnEsc>
+      <p class="confirm-msg">{req.message}</p>
+      {#snippet footer()}
+        <!-- Focus starts on Cancelar so a stray Enter never confirms a destructive action. -->
+        <button class="btn" data-autofocus onclick={() => answer(false)}>Cancelar</button>
+        <button class="btn {req.danger ? 'danger' : 'primary'}" onclick={() => answer(true)}>
+          {req.confirmText}
+        </button>
+      {/snippet}
+    </Modal>
+  {/key}
 {/if}
 
 <style>
@@ -28,5 +31,6 @@
     color: var(--muted);
     line-height: 1.55;
     font-size: 14px;
+    white-space: pre-line;
   }
 </style>

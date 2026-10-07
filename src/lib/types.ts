@@ -73,6 +73,17 @@ export interface EngineStatus {
   api_version?: string;
   containers?: number;
   images?: number;
+  /** CPUs and memory (bytes) available to the engine, from `docker info`. */
+  ncpu?: number;
+  mem_total?: number;
+}
+
+export interface DiskUsage {
+  images: number;
+  containers: number;
+  volumes: number;
+  build_cache: number;
+  reclaimable: number;
 }
 
 export interface DistroInfo {

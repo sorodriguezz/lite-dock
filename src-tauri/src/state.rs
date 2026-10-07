@@ -6,6 +6,14 @@ use std::pin::Pin;
 use tokio::io::AsyncWrite;
 use tokio::sync::Mutex;
 
+/// Bookkeeping for an interactive exec session (besides its stdin writer).
+pub struct ExecMeta {
+    /// Docker exec instance id (`inspect_exec` → PID of the process).
+    pub exec_id: String,
+    /// Task forwarding the session's output as `exec-output` events.
+    pub reader: tokio::task::AbortHandle,
+}
+
 pub struct AppState {
     /// Cached bollard client. Lazily created on first use.
     pub docker: Mutex<Option<Docker>>,
@@ -14,6 +22,8 @@ pub struct AppState {
     pub engine_child: Mutex<Option<tokio::process::Child>>,
     /// Active interactive exec sessions: session id -> stdin writer.
     pub exec_inputs: Mutex<HashMap<String, Pin<Box<dyn AsyncWrite + Send>>>>,
+    /// Per exec session: what `exec_kill` needs to really stop it.
+    pub exec_meta: Mutex<HashMap<String, ExecMeta>>,
     /// Running log-stream tasks keyed by container id, so they can be cancelled.
     pub log_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     /// Integrated-terminal sessions: session id -> shell stdin writer.
@@ -28,6 +38,7 @@ impl AppState {
             docker: Mutex::new(None),
             engine_child: Mutex::new(None),
             exec_inputs: Mutex::new(HashMap::new()),
+            exec_meta: Mutex::new(HashMap::new()),
             log_tasks: Mutex::new(HashMap::new()),
             term_inputs: Mutex::new(HashMap::new()),
             term_children: Mutex::new(HashMap::new()),

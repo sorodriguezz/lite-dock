@@ -2,7 +2,7 @@
 
 use crate::config;
 use crate::docker;
-use crate::docker::types::EngineStatus;
+use crate::docker::types::{DiskUsageDto, EngineStatus};
 use crate::error::AppResult;
 use crate::state::AppState;
 use crate::wsl::lifecycle;
@@ -36,24 +36,28 @@ pub async fn engine_logs() -> AppResult<String> {
     lifecycle::engine_log_tail(200).await
 }
 
+// The CLI commands below spawn `setx` / `reg` (blocking, and `setx` can take a
+// while to broadcast the change), so they run off the main thread via
+// `spawn_blocking` instead of freezing the UI.
+
 /// Persist DOCKER_HOST so the Windows `docker` CLI talks to LiteDock's engine.
 #[tauri::command]
-pub fn enable_docker_cli() -> AppResult<String> {
-    crate::wsl::set_docker_host();
+pub async fn enable_docker_cli() -> AppResult<String> {
+    tauri::async_runtime::spawn_blocking(crate::wsl::set_docker_host).await?;
     Ok(config::engine_tcp_url())
 }
 
 /// Remove DOCKER_HOST so the Windows `docker` CLI stops using LiteDock.
 #[tauri::command]
-pub fn disable_docker_cli() -> AppResult<()> {
-    crate::wsl::unset_docker_host();
+pub async fn disable_docker_cli() -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(crate::wsl::unset_docker_host).await?;
     Ok(())
 }
 
 /// Whether the Windows `docker` CLI is currently wired to LiteDock's engine.
 #[tauri::command]
-pub fn cli_status() -> AppResult<bool> {
-    Ok(crate::wsl::docker_host_enabled())
+pub async fn cli_status() -> AppResult<bool> {
+    Ok(tauri::async_runtime::spawn_blocking(crate::wsl::docker_host_enabled).await?)
 }
 
 /// Open a Windows path (e.g. a `\\wsl$` UNC to a volume) in File Explorer.
@@ -108,6 +112,19 @@ pub async fn system_df(state: State<'_, AppState>) -> AppResult<serde_json::Valu
     docker::system::df(&docker).await
 }
 
+/// `docker system df` summarised in bytes, incl. what a prune could reclaim.
+#[tauri::command]
+pub async fn disk_usage(state: State<'_, AppState>) -> AppResult<DiskUsageDto> {
+    let docker = state.docker().await?;
+    docker::system::disk_usage(&docker).await
+}
+
+/// Remove all unused build cache; returns the reclaimed bytes.
+#[tauri::command]
+pub async fn prune_build_cache() -> AppResult<u64> {
+    docker::system::prune_build_cache().await
+}
+
 #[derive(serde::Serialize)]
 pub struct AppUsage {
     pub cpu_percent: f64,
@@ -132,7 +149,7 @@ pub struct WslConfig {
 }
 
 /// Read the current WSL2 memory settings from `.wslconfig`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn wsl_config_get() -> AppResult<WslConfig> {
     let (memory_mb, auto_reclaim) = crate::wsl::read_wsl_config();
     Ok(WslConfig {
@@ -166,7 +183,7 @@ pub async fn wsl_list_distros() -> AppResult<Vec<String>> {
 /// Whether LiteDock's docker shim is installed in `distro`.
 #[tauri::command]
 pub async fn wsl_integration_get(distro: String) -> AppResult<bool> {
-    Ok(crate::wsl::integration_status(&distro).await)
+    Ok(crate::wsl::integration_check(&distro).await)
 }
 
 /// Install/remove the docker-CLI integration (shims) in `distro`.

@@ -181,6 +181,7 @@
 <div class="page-head">
   <span class="ph-icon"><Icon name="settings" /></span>
   <h2>Configuración</h2>
+  <p class="page-sub">Motor, WSL y comandos docker</p>
 </div>
 
 <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px">
@@ -264,8 +265,9 @@
   {/if}
   <div style="color:var(--faint);font-size:12px;margin-top:8px">
     Hace que <code>docker</code> / <code>docker compose</code> funcionen <b>dentro</b> de esa distro WSL,
-    reenviando al motor de LiteDock — útil para scripts que ejecutan <code>docker</code> desde WSL (como tu readycheck).
-    Instala unos shims en <code>/usr/local/bin</code> de la distro; "quitar" los elimina.
+    reenviando al motor de LiteDock — útil para scripts que ejecutan <code>docker</code> desde WSL.
+    Instala unos accesos directos de comandos (pequeños programas que redirigen <code>docker</code> a LiteDock)
+    en <code>/usr/local/bin</code> de la distro; "quitar" los elimina.
   </div>
 </div>
 

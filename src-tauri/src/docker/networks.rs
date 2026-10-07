@@ -1,9 +1,11 @@
 //! Network operations via the Docker Engine API.
 
+use bollard::container::ListContainersOptions;
 use bollard::network::{
     CreateNetworkOptions, InspectNetworkOptions, ListNetworksOptions, PruneNetworksOptions,
 };
 use bollard::Docker;
+use std::collections::HashMap;
 
 use super::types::NetworkDto;
 use crate::error::AppResult;
@@ -12,17 +14,38 @@ pub async fn list(docker: &Docker) -> AppResult<Vec<NetworkDto>> {
     let nets = docker
         .list_networks(None::<ListNetworksOptions<String>>)
         .await?;
-    Ok(nets.into_iter().map(map_network).collect())
+    let counts = attached_counts(docker).await;
+    Ok(nets.into_iter().map(|n| map_network(n, &counts)).collect())
 }
 
-fn map_network(n: bollard::models::Network) -> NetworkDto {
+/// Connected (running) containers per network name. The list endpoint never
+/// fills `Containers`, so derive it from a single container listing instead of
+/// inspecting every network. Best-effort: empty on error.
+async fn attached_counts(docker: &Docker) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    let containers = docker
+        .list_containers(None::<ListContainersOptions<String>>)
+        .await
+        .unwrap_or_default();
+    for c in containers {
+        if let Some(nets) = c.network_settings.and_then(|s| s.networks) {
+            for name in nets.into_keys() {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn map_network(n: bollard::models::Network, counts: &HashMap<String, usize>) -> NetworkDto {
+    let name = n.name.unwrap_or_default();
     NetworkDto {
         id: n.id.unwrap_or_default(),
-        name: n.name.unwrap_or_default(),
+        containers: counts.get(&name).copied().unwrap_or(0),
+        name,
         driver: n.driver.unwrap_or_default(),
         scope: n.scope.unwrap_or_default(),
         internal: n.internal.unwrap_or_default(),
-        containers: n.containers.map(|c| c.len()).unwrap_or(0),
     }
 }
 

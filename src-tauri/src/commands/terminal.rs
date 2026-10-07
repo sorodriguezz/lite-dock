@@ -34,7 +34,15 @@ fn build_command(kind: &str) -> AppResult<tokio::process::Command> {
     let mut cmd = match kind {
         "host" => {
             let mut c = crate::wsl::command("powershell.exe");
-            c.args(["-NoLogo", "-NoProfile"]);
+            // Pipes default to the OEM code page (e.g. CP850); switch both
+            // directions to UTF-8 so accented text round-trips with the UI.
+            c.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NoExit",
+                "-Command",
+                "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8",
+            ]);
             c
         }
         "engine" => {
@@ -58,7 +66,8 @@ pub async fn terminal_start(
     state: State<'_, AppState>,
     kind: String,
 ) -> AppResult<String> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use crate::wsl::read_line_lossy;
+    use tokio::io::BufReader;
 
     let mut cmd = build_command(&kind)?;
     let mut child = cmd
@@ -91,8 +100,8 @@ pub async fn terminal_start(
         let app2 = app.clone();
         let sess = session.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (mut rd, mut buf) = (BufReader::new(stderr), Vec::new());
+            while let Some(line) = read_line_lossy(&mut rd, &mut buf).await {
                 let _ = app2.emit("terminal-output", TermLine { session: sess.clone(), line });
             }
         });
@@ -103,8 +112,8 @@ pub async fn terminal_start(
         let app2 = app.clone();
         let sess = session.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (mut rd, mut buf) = (BufReader::new(stdout), Vec::new());
+            while let Some(line) = read_line_lossy(&mut rd, &mut buf).await {
                 let _ = app2.emit("terminal-output", TermLine { session: sess.clone(), line });
             }
             let st = app2.state::<AppState>();

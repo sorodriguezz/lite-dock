@@ -15,6 +15,12 @@ export const route = writable<Route>("dashboard");
 export const engine = writable<EngineStatus>({ running: false });
 /** When set, the Images view pre-fills its filter with this (image hyperlink). */
 export const imagesFilter = writable<string>("");
+/** Ask the bottom terminal panel to open on a given shell ("engine" = docker CLI in WSL). */
+export const terminalReq = writable<{ kind: "host" | "engine"; at: number } | null>(null);
+/** Engine start/stop/restart in progress (shared by the sidebar card and empty states). */
+export const engineBusy = writable<"" | "start" | "stop" | "restart">("");
+/** Open a container's detail page from elsewhere (e.g. a row on the Panel). */
+export const openContainerReq = writable<string | null>(null);
 
 export type ToastKind = "info" | "success" | "error";
 export interface ToastMsg {
@@ -25,10 +31,15 @@ export interface ToastMsg {
 export const toasts = writable<ToastMsg[]>([]);
 
 let nextId = 0;
+const MAX_TOASTS = 5;
+export function dismissToast(id: number) {
+  toasts.update((t) => t.filter((x) => x.id !== id));
+}
+/** Show a toast. Errors stay until dismissed (they often carry details worth reading). */
 export function notify(kind: ToastKind, text: string) {
   const id = ++nextId;
-  toasts.update((t) => [...t, { id, kind, text }]);
-  setTimeout(() => toasts.update((t) => t.filter((x) => x.id !== id)), 4200);
+  toasts.update((t) => [...t, { id, kind, text }].slice(-MAX_TOASTS));
+  if (kind !== "error") setTimeout(() => dismissToast(id), 4200);
 }
 
 // ── confirmation dialog ────────────────────────────────────────────────
@@ -45,7 +56,7 @@ export const confirmReq = writable<ConfirmReq | null>(null);
 
 /**
  * Ask the user to confirm a destructive/disruptive action. Resolves `true` if
- * they choose Sí, `false` on No / Escape / backdrop. Usage:
+ * they confirm, `false` on Cancelar / Escape. Usage:
  *   if (!(await askConfirm({ message: "¿Eliminar…?" }))) return;
  */
 export function askConfirm(opts: {
@@ -55,6 +66,12 @@ export function askConfirm(opts: {
   danger?: boolean;
 }): Promise<boolean> {
   return new Promise((resolve) => {
+    // Only one confirmation at a time: a newer request cancels the pending one
+    // instead of leaving its promise unresolved forever.
+    confirmReq.update((prev) => {
+      prev?.resolve(false);
+      return null;
+    });
     confirmReq.set({
       id: ++nextId,
       title: opts.title ?? "¿Estás seguro?",

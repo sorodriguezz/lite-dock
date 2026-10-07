@@ -47,7 +47,17 @@
     load();
   });
 
-  let filtered = $derived(items.filter((i) => !q || primaryTag(i.tags).includes(q)));
+  // Match ANY tag of the image (not just the first) or its ID, case-insensitive,
+  // so links like "nginx:1.25" from a container find the image.
+  let filtered = $derived.by(() => {
+    const needle = q.trim().toLowerCase().replace(/^sha256:/, "");
+    if (!needle) return items;
+    return items.filter(
+      (i) =>
+        i.tags.some((t) => t.toLowerCase().includes(needle)) ||
+        i.id.replace(/^sha256:/, "").startsWith(needle),
+    );
+  });
 
   // ── multi-select delete ──
   let sel = $state<Record<string, boolean>>({});
@@ -175,7 +185,13 @@
   }
 
   async function remove(i: Image) {
-    if (!(await askConfirm({ message: `¿Eliminar la imagen "${primaryTag(i.tags)}"? No se puede deshacer.` })))
+    // Removing by ID deletes every tag of the image: name them all.
+    const tags = i.tags.filter((t) => t && t !== "<none>:<none>");
+    const message =
+      tags.length > 1
+        ? `Se eliminarán todas sus etiquetas:\n${tags.join("\n")}\n\nNo se puede deshacer.`
+        : `¿Eliminar la imagen "${primaryTag(i.tags)}"? No se puede deshacer.`;
+    if (!(await askConfirm({ title: tags.length > 1 ? `¿Eliminar ${tags.length} etiquetas?` : undefined, message })))
       return;
     if (await guard(() => api.removeImage(i.id, true), "Imagen eliminada")) load();
   }
@@ -195,12 +211,13 @@
 <div class="page-head">
   <span class="ph-icon"><Icon name="image" /></span>
   <h2>Imágenes</h2>
+  <p class="page-sub">Imágenes descargadas en el motor</p>
   <span class="count">{filtered.length}</span>
   <div class="grow"></div>
   {#if selectedIds.length}
     <button class="btn danger" onclick={bulkRemove}>Eliminar seleccionadas ({selectedIds.length})</button>
   {/if}
-  <input class="search" type="search" placeholder="Filtrar por tag…" bind:value={q} />
+  <input class="search" type="search" placeholder="Filtrar por etiqueta…" bind:value={q} />
   <button class="btn primary" onclick={openPull}>Buscar / Descargar</button>
   <button class="btn" onclick={prune}>Limpiar huérfanas</button>
   <button class="btn" onclick={load} disabled={loading}>
@@ -209,20 +226,31 @@
 </div>
 
 {#if filtered.length === 0}
-  <div class="empty"><div class="big">Sin imágenes</div>Usa “Buscar / Descargar”.</div>
+  <div class="empty">
+    {#if loading && items.length === 0}
+      <span class="spinner"></span>
+    {:else if items.length > 0}
+      <div class="big">Ninguna imagen coincide con “{q}”</div>
+      <button class="btn" onclick={() => (q = "")}>Limpiar búsqueda</button>
+    {:else}
+      <div class="big">Aún no tienes imágenes</div>
+      Usa “Buscar / Descargar” para traer una de Docker Hub.
+    {/if}
+  </div>
 {:else}
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Tag</th><th>ID</th><th>Tamaño</th><th>Creada</th><th></th></tr>
+        <tr><th style="width:36px;text-align:center"><input type="checkbox" checked={allSelected} onchange={toggleAll} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar todo" /></th><th>Etiqueta</th><th>ID</th><th>Tamaño</th><th>Creada</th><th></th></tr>
       </thead>
       <tbody>
         {#each filtered as i (i.id)}
           <tr>
-            <td style="text-align:center"><input type="checkbox" checked={!!sel[i.id]} onchange={() => toggleSel(i.id)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar" /></td>
+            <td style="text-align:center"><input type="checkbox" checked={!!sel[i.id]} onchange={() => toggleSel(i.id)} style="width:auto;margin:0;cursor:pointer" aria-label="Seleccionar {primaryTag(i.tags)}" /></td>
             <td>
               <b>{primaryTag(i.tags)}</b>
-              {#if i.dangling}<span class="badge" style="margin-left:6px">dangling</span>{/if}
+              {#if i.tags.length > 1}<span class="badge" style="margin-left:6px" title={i.tags.slice(1).join("\n")}>+{i.tags.length - 1}</span>{/if}
+              {#if i.dangling}<span class="badge" style="margin-left:6px" title="Sin etiqueta: ya no la usa ninguna versión">huérfana</span>{/if}
             </td>
             <td>
               <button class="hash-copy mono" title="Copiar ID completo"
@@ -233,7 +261,7 @@
             <td>
               <div class="cell-actions">
                 <button class="btn" onclick={() => showHistory(i)}>Historial</button>
-                <button class="btn icon danger" title="Eliminar" onclick={() => remove(i)}>🗑</button>
+                <button class="btn icon danger" title="Eliminar" aria-label="Eliminar {primaryTag(i.tags)}" onclick={() => remove(i)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg></button>
               </div>
             </td>
           </tr>
@@ -262,24 +290,25 @@
         {#each results as r (r.name)}
           <div class="search-item {pullRef.startsWith(r.name + ':') ? 'sel' : ''}">
             <button class="si-select" onclick={() => selectResult(r)}>
-              <div class="si-head">
+              <span class="si-head">
                 <b>{r.name}</b>
                 {#if r.official}<span class="si-official">oficial</span>{/if}
                 <span class="grow"></span>
                 <span class="si-stars">★ {r.stars}</span>
-              </div>
-              {#if r.description}<div class="si-desc">{r.description}</div>{/if}
+              </span>
+              {#if r.description}<span class="si-desc">{r.description}</span>{/if}
             </button>
             <button
               class="si-hub"
               title="Ver en Docker Hub"
+              aria-label="Ver {r.name} en Docker Hub"
               onclick={() => openHub(r)}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                 stroke-linecap="round" stroke-linejoin="round">
                 <path d="M7 17 17 7M8 7h9v9" />
               </svg>
-              Hub
+              Docker Hub
             </button>
           </div>
         {/each}

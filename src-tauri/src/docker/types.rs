@@ -94,4 +94,19 @@ pub struct EngineStatus {
     pub api_version: Option<String>,
     pub containers: Option<u64>,
     pub images: Option<u64>,
+    /// CPUs visible to the engine (`docker info` NCPU).
+    pub ncpu: Option<i64>,
+    /// Total memory visible to the engine, in bytes (`docker info` MemTotal).
+    pub mem_total: Option<i64>,
+}
+
+/// Disk usage summary in bytes (`docker system df`).
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct DiskUsageDto {
+    pub images: u64,
+    pub containers: u64,
+    pub volumes: u64,
+    pub build_cache: u64,
+    /// Unused images + build cache not in use + unreferenced volumes.
+    pub reclaimable: u64,
 }

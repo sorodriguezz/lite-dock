@@ -3,7 +3,7 @@
 use crate::docker::containers as c;
 use crate::docker::types::{ContainerDto, StatsDto};
 use crate::error::{AppError, AppResult};
-use crate::state::AppState;
+use crate::state::{AppState, ExecMeta};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
@@ -178,7 +178,7 @@ pub async fn exec_start(
 
     let docker = state.docker().await?;
     let command = cmd.unwrap_or_else(|| vec!["/bin/sh".to_string()]);
-    let results = c::exec_start(&docker, &id, command).await?;
+    let (exec_id, results) = c::exec_start(&docker, &id, command).await?;
     let session = new_session_id();
 
     match results {
@@ -189,9 +189,12 @@ pub async fn exec_start(
                 .await
                 .insert(session.clone(), input);
 
+            // Hold the meta lock until the reader is registered, so its
+            // end-of-session cleanup can't run before the insert below.
+            let mut meta = state.exec_meta.lock().await;
             let app2 = app.clone();
             let sess = session.clone();
-            tokio::spawn(async move {
+            let reader = tokio::spawn(async move {
                 while let Some(item) = output.next().await {
                     match item {
                         Ok(out) => {
@@ -209,8 +212,16 @@ pub async fn exec_start(
                 // Session ended: clean up the stored stdin writer.
                 let st = app2.state::<AppState>();
                 st.exec_inputs.lock().await.remove(&sess);
+                st.exec_meta.lock().await.remove(&sess);
                 let _ = app2.emit("exec-exit", sess.clone());
             });
+            meta.insert(
+                session.clone(),
+                ExecMeta {
+                    exec_id,
+                    reader: reader.abort_handle(),
+                },
+            );
             Ok(session)
         }
         StartExecResults::Detached => Err(AppError::other("exec se inició en modo detached")),
@@ -236,10 +247,69 @@ pub async fn exec_write(
     }
 }
 
-/// Close an exec session (drops stdin → the shell receives EOF and exits).
+/// Close an exec session and really stop what runs in it. Just dropping stdin
+/// is not enough: with a TTY the process never sees EOF, so `top`, `vim`,
+/// `tail -f` (even the idle shell) kept running and emitting `exec-output`.
+/// Returns at once; the cleanup runs in the background:
+/// 1. Ctrl-C (foreground job) + Ctrl-D (EOF for the shell prompt) on stdin —
+///    the cheap, graceful path; Ctrl-D is harmless if a full-screen app eats it
+///    (unlike typing `exit` into e.g. vim).
+/// 2. If the exec is still running after a moment: hang up its session / kill
+///    it from the engine distro (`c::exec_terminate`).
+/// 3. Stop forwarding its output.
 #[tauri::command]
-pub async fn exec_kill(state: State<'_, AppState>, session: String) -> AppResult<()> {
-    state.exec_inputs.lock().await.remove(&session);
+pub async fn exec_kill(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session: String,
+) -> AppResult<()> {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    let input = state.exec_inputs.lock().await.remove(&session);
+    let meta = state.exec_meta.lock().await.remove(&session);
+    let docker = state.docker().await.ok();
+
+    tokio::spawn(async move {
+        if let Some(mut input) = input {
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                input.write_all(b"\x03").await?;
+                input.flush().await?;
+                // Let the shell take the terminal back before the EOF.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                input.write_all(b"\x04").await?;
+                input.flush().await
+            })
+            .await;
+        }
+        let Some(meta) = meta else {
+            return; // already finished (or unknown session)
+        };
+        if let Some(docker) = docker {
+            // Give the graceful path ~0.5 s before escalating.
+            let mut running = true;
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                running = docker
+                    .inspect_exec(&meta.exec_id)
+                    .await
+                    .map(|i| i.running == Some(true))
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+            }
+            if running {
+                c::exec_terminate(&docker, &meta.exec_id).await;
+            }
+        }
+        // Whatever happened, the UI is gone: stop emitting its output. If the
+        // reader was still alive, its own `exec-exit` won't fire — send it here.
+        if !meta.reader.is_finished() {
+            meta.reader.abort();
+            let _ = app.emit("exec-exit", session);
+        }
+    });
     Ok(())
 }
 
@@ -301,6 +371,20 @@ pub async fn container_download(
     c::download(&docker, &id, &path, is_dir).await
 }
 
+/// Download ONE regular file from the container straight to the Windows path
+/// `dest` (created/overwritten) — no base64 / `number[]` round trip through the
+/// webview, so it scales to big files. Returns the number of bytes written.
+#[tauri::command]
+pub async fn container_download_to_host(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    dest: String,
+) -> AppResult<u64> {
+    let docker = state.docker().await?;
+    c::download_to_host(&docker, &id, &path, &dest).await
+}
+
 /// Write raw bytes to a host path (used to save the files/zips the user downloads).
 #[tauri::command]
 pub async fn write_host_file(path: String, data: Vec<u8>) -> AppResult<()> {
@@ -322,6 +406,7 @@ pub async fn run_container(
     restart: String,
     pull: bool,
     publish_all: bool,
+    auto_remove: Option<bool>,
 ) -> AppResult<String> {
     let docker = state.docker().await?;
     c::create_and_start(
@@ -334,6 +419,7 @@ pub async fn run_container(
         &restart,
         pull,
         publish_all,
+        auto_remove.unwrap_or(false),
     )
     .await
 }

@@ -27,6 +27,8 @@ pub fn run() {
             commands::engine::engine_stop,
             commands::engine::engine_restart,
             commands::engine::system_df,
+            commands::engine::disk_usage,
+            commands::engine::prune_build_cache,
             commands::engine::app_usage,
             commands::engine::wsl_config_get,
             commands::engine::wsl_config_apply,
@@ -65,6 +67,7 @@ pub fn run() {
             commands::containers::container_delete_path,
             commands::containers::container_upload,
             commands::containers::container_download,
+            commands::containers::container_download_to_host,
             commands::containers::write_host_file,
             commands::containers::run_container,
             // ── images ────────────────────────────────────────────────────
@@ -109,7 +112,7 @@ pub fn run() {
 
             // Self-heal a stale DOCKER_HOST left pointing at the direct engine
             // port (bypasses path translation → breaks Windows bind mounts).
-            // Cheap and only acts when the value is exactly our direct port.
+            // Cheap and only acts on a stale LiteDock value — never when unset.
             std::thread::spawn(crate::wsl::heal_docker_host);
 
             // Refresh docker integration in any distro we set up before, so an

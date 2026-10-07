@@ -150,7 +150,7 @@ pub async fn ls() -> AppResult<serde_json::Value> {
     ])
     .await?;
     if !ok {
-        return Err(AppError::other(format!("compose ls failed: {err}")));
+        return Err(AppError::other(format!("falló compose ls: {err}")));
     }
     let v: serde_json::Value =
         serde_json::from_str(out.trim()).unwrap_or_else(|_| serde_json::json!([]));
@@ -167,7 +167,7 @@ pub async fn ps(file_win: String, project: String) -> AppResult<serde_json::Valu
     let str_args: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
     let (ok, out, err) = wsl::run_wsl(&str_args).await?;
     if !ok {
-        return Err(AppError::other(format!("compose ps failed: {err}")));
+        return Err(AppError::other(format!("falló compose ps: {err}")));
     }
     // `compose ps` emits either a JSON array or NDJSON depending on version;
     // handle both.

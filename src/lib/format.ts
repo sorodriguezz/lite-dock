@@ -201,3 +201,96 @@ export function parseAnsiSegments(raw: string): AnsiSeg[] {
   _segCache.set(raw, res);
   return res;
 }
+
+/** Exit code parsed from Docker's status text ("Exited (137) 2 hours ago"). */
+export function exitCode(status: string | undefined): number | null {
+  const m = /\((-?\d+)\)/.exec(status ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Visual kind + Spanish label for a container state. A clean stop (exit 0) is
+ * neutral; only a non-zero exit or a dead container is shown as an error.
+ */
+export function containerState(c: { state: string; status?: string }): { kind: string; label: string } {
+  switch (c.state) {
+    case "running":
+      return { kind: "running", label: "En ejecución" };
+    case "paused":
+      return { kind: "paused", label: "Pausado" };
+    case "restarting":
+      return { kind: "restarting", label: "Reiniciando" };
+    case "created":
+      return { kind: "created", label: "Creado" };
+    case "removing":
+      return { kind: "created", label: "Eliminando" };
+    case "dead":
+      return { kind: "error", label: "Error" };
+    case "exited": {
+      const code = exitCode(c.status);
+      return code && code !== 0
+        ? { kind: "error", label: `Error · código ${code}` }
+        : { kind: "exited", label: "Detenido" };
+    }
+    default:
+      return { kind: "", label: c.state };
+  }
+}
+
+const UNIT: Record<string, string> = {
+  second: "s",
+  minute: "min",
+  hour: "h",
+  day: "d",
+  week: "sem",
+  month: "mes",
+  year: "año",
+};
+/** "Up 52 minutes" / "Exited (0) 2 hours ago" → "52 min" / "2 h" (Docker's duration, short Spanish). */
+export function dockerDuration(status: string | undefined): string {
+  const m = /(\d+|About an?|Less than an?)\s+(second|minute|hour|day|week|month|year)s?/i.exec(status ?? "");
+  if (!m) return "";
+  const n = /^\d+$/.test(m[1]) ? Number(m[1]) : /^less/i.test(m[1]) ? 0 : 1;
+  const u = UNIT[m[2].toLowerCase()];
+  if (n === 0) return `<1 ${u}`;
+  if (u === "mes" && n > 1) return `${n} meses`;
+  if (u === "año" && n > 1) return `${n} años`;
+  return `${n} ${u}`;
+}
+
+/** Short "since when" line under a container's state. */
+export function stateSince(c: { state: string; status?: string }): string {
+  const d = dockerDuration(c.status);
+  switch (c.state) {
+    case "running":
+      return d ? `hace ${d}` : "";
+    case "exited":
+    case "dead":
+      return d ? `salió hace ${d}` : "";
+    case "paused":
+      return "en pausa";
+    case "created":
+      return "sin iniciar";
+    case "restarting":
+      return "reiniciando";
+    default:
+      return "";
+  }
+}
+
+/** Published ports, de-duplicated (Docker lists IPv4 and IPv6 separately). */
+export function publishedPorts(ports: { public_port?: number; private_port: number; type: string }[]): {
+  port: number;
+  label: string;
+  web: boolean;
+}[] {
+  const seen = new Map<string, { port: number; label: string; web: boolean }>();
+  for (const p of ports) {
+    if (!p.public_port) continue;
+    const key = `${p.public_port}/${p.type}`;
+    if (seen.has(key)) continue;
+    const base = p.public_port === p.private_port ? `${p.public_port}` : `${p.public_port} → ${p.private_port}`;
+    seen.set(key, { port: p.public_port, label: p.type === "udp" ? `${base}/udp` : base, web: p.type === "tcp" });
+  }
+  return [...seen.values()];
+}

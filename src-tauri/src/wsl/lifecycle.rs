@@ -45,14 +45,19 @@ pub async fn terminate() -> AppResult<()> {
 
 /// Spawn dockerd (foreground) inside the distro, streaming its stdout+stderr to
 /// the frontend as `engine-log` events, and keep the child handle in state.
-/// No-op if a handle already exists.
+/// No-op if a handle already exists and is still running.
 pub async fn start_engine(app: &AppHandle, state: &AppState) -> AppResult<()> {
     use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::BufReader;
 
     let mut guard = state.engine_child.lock().await;
-    if guard.is_some() {
-        return Ok(());
+    if let Some(child) = guard.as_mut() {
+        // Still alive → nothing to do. If it already exited (dockerd crashed,
+        // `wsl --shutdown`…), drop the stale handle and spawn a fresh one.
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            return Ok(());
+        }
+        *guard = None;
     }
     let mut child = wsl::command("wsl.exe")
         .args([
@@ -73,8 +78,8 @@ pub async fn start_engine(app: &AppHandle, state: &AppState) -> AppResult<()> {
     if let Some(out) = child.stdout.take() {
         let app2 = app.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(out).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (mut rd, mut buf) = (BufReader::new(out), Vec::new());
+            while let Some(line) = wsl::read_line_lossy(&mut rd, &mut buf).await {
                 let _ = app2.emit("engine-log", line);
             }
         });
@@ -82,8 +87,8 @@ pub async fn start_engine(app: &AppHandle, state: &AppState) -> AppResult<()> {
     if let Some(err) = child.stderr.take() {
         let app2 = app.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (mut rd, mut buf) = (BufReader::new(err), Vec::new());
+            while let Some(line) = wsl::read_line_lossy(&mut rd, &mut buf).await {
                 let _ = app2.emit("engine-log", line);
             }
         });

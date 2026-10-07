@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import Modal from "../components/Modal.svelte";
+  import { onMount, tick } from "svelte";
   import LogConsole from "../components/LogConsole.svelte";
   import XTerm from "../components/XTerm.svelte";
   import { api, listen, type UnlistenFn } from "../api";
-  import { notify, askConfirm } from "../stores";
+  import { notify, askConfirm, guard, copyText } from "../stores";
   import type { Container, FileEntry, Stats } from "../types";
-  import { bytes } from "../format";
+  import { bytes, shortId, containerState, stateSince, publishedPorts } from "../format";
   import { makeZip, parseTar, b64ToBytes, type ArchiveFile } from "../archive";
   import { open } from "@tauri-apps/plugin-dialog";
   import Sparkline from "../components/Sparkline.svelte";
@@ -14,14 +13,25 @@
 
   interface Props {
     container: Container;
-    onClose: () => void;
+    /** Back to the containers list. */
+    onBack: () => void;
   }
-  let { container, onClose }: Props = $props();
+  let { container, onBack }: Props = $props();
+
+  let st = $derived(containerState(container));
+  let ports = $derived(publishedPorts(container.ports));
+  let running = $derived(container.state === "running");
+  let webPort = $derived(running ? ports.find((p) => p.web) : undefined);
 
   type Tab = "logs" | "terminal" | "stats" | "files" | "inspect";
   let tab = $state<Tab>("logs");
 
-  let inspectJson = $state("");
+  // `docker inspect` result: feeds the header (network/IP), the limits form,
+  // the Inspeccionar summary and its raw JSON view.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let info = $state<any>(null);
+  let showJson = $state(false);
+  let inspectJson = $derived(info ? JSON.stringify(info, null, 2) : "");
 
   let logLines = $state<string[]>([]);
   let logUnlisten: UnlistenFn | undefined;
@@ -32,11 +42,21 @@
   let termPending = $state<string[]>([]);
   let execUnlisten: UnlistenFn | undefined;
   let execExitUnlisten: UnlistenFn | undefined;
+  let termStarting = false;
+  // Once opened, the terminal stays mounted (hidden) so output keeps rendering
+  // while another tab is shown.
+  let termMounted = $state(false);
+  // Set when the modal closes, so async setup that resolves later cleans itself up.
+  let destroyed = false;
 
   const STATS_MS = 1500; // sample interval for the live graphs
   const STATS_S = STATS_MS / 1000;
   let stats = $state<Stats | null>(null);
-  let statsTimer: ReturnType<typeof setInterval> | undefined;
+  const HIST = 40; // samples kept for the live graphs
+  let statsTimer: ReturnType<typeof setTimeout> | undefined;
+  let prevAt: number | null = null;
+  let firstAt = $state(0); // timestamp of the oldest sample still on the graph
+  let histTimes: number[] = [];
   let cpuHist = $state<number[]>([]);
   let memHist = $state<number[]>([]); // bytes used → the graph auto-scales to real usage
   let netHist = $state<number[]>([]);
@@ -45,10 +65,19 @@
   let prevDisk: number | null = null;
   // Peak memory, for the graph axis label when the container has no memory limit.
   let memPeak = $derived(memHist.length ? Math.max(...memHist) : 0);
-  let netRate = $derived(netHist.length ? netHist[netHist.length - 1] / STATS_S : 0);
-  let diskRate = $derived(diskHist.length ? diskHist[diskHist.length - 1] / STATS_S : 0);
-  let netPeak = $derived(netHist.length ? Math.max(...netHist) / STATS_S : 0);
-  let diskPeak = $derived(diskHist.length ? Math.max(...diskHist) / STATS_S : 0);
+  // net/disk history already holds bytes per second.
+  let netRate = $derived(netHist.length ? netHist[netHist.length - 1] : 0);
+  let diskRate = $derived(diskHist.length ? diskHist[diskHist.length - 1] : 0);
+  let netPeak = $derived(netHist.length ? Math.max(...netHist) : 0);
+  let diskPeak = $derived(diskHist.length ? Math.max(...diskHist) : 0);
+  // CPU can exceed 100 % (one core = 100 %): scale the graph to the real peak.
+  let cpuMax = $derived(Math.max(100, ...cpuHist));
+  // Real time window covered by the graphs (samples take ~1-2 s each).
+  let prevAtView = $state(0);
+  let spanLabel = $derived.by(() => {
+    const secs = firstAt && prevAtView ? Math.round((prevAtView - firstAt) / 1000) : 0;
+    return secs >= 90 ? `~${Math.round(secs / 60)} min` : `~${secs} s`;
+  });
 
   // resource limits
   let memLimit = $state("");
@@ -66,71 +95,162 @@
 
   onMount(() => {
     startLogs();
-    loadLimits();
+    loadInspect(true);
     return () => stopAll();
   });
 
-  // Pre-fill the limit fields with the container's current limits (persisted by Docker).
-  async function loadLimits() {
+  async function loadInspect(prefillLimits = false) {
     try {
-      const data = (await api.inspectContainer(container.id)) as {
-        HostConfig?: { Memory?: number; NanoCpus?: number };
-      };
-      const mem = data.HostConfig?.Memory ?? 0;
-      const nano = data.HostConfig?.NanoCpus ?? 0;
-      if (mem > 0) memLimit = String(Math.round(mem / (1024 * 1024)));
-      if (nano > 0) cpuLimit = String(+(nano / 1e9).toFixed(2));
+      info = await api.inspectContainer(container.id);
+      // Pre-fill the limit fields with the container's current limits (persisted by Docker).
+      if (prefillLimits) {
+        const mem = info?.HostConfig?.Memory ?? 0;
+        const nano = info?.HostConfig?.NanoCpus ?? 0;
+        if (mem > 0) memLimit = String(Math.round(mem / (1024 * 1024)));
+        if (nano > 0) cpuLimit = String(+(nano / 1e9).toFixed(2)).replace(".", ",");
+      }
     } catch {
       /* ignore */
     }
   }
 
+  // Networks + IPs, e.g. "tienda_default · 172.19.0.3".
+  let networks = $derived.by(() => {
+    const nets = info?.NetworkSettings?.Networks ?? {};
+    return Object.entries(nets).map(([name, n]) => {
+      const ip = (n as { IPAddress?: string })?.IPAddress;
+      return ip ? `${name} · ${ip}` : name;
+    });
+  });
+
+  const RESTART: Record<string, string> = {
+    no: "No reiniciar",
+    always: "Siempre",
+    "unless-stopped": "Salvo que lo detengas",
+    "on-failure": "Solo si falla",
+  };
+  // Human summary for the Inspeccionar tab (the raw JSON stays one click away).
+  let facts = $derived.by(() => {
+    if (!info) return [];
+    const cfg = info.Config ?? {};
+    const host = info.HostConfig ?? {};
+    const cmd = [...(cfg.Entrypoint ?? []), ...(cfg.Cmd ?? [])].join(" ");
+    const mounts = (info.Mounts ?? []).map(
+      (m: { Source?: string; Name?: string; Destination?: string; Type?: string }) =>
+        `${m.Type === "volume" ? m.Name : m.Source} → ${m.Destination} (${m.Type === "volume" ? "volumen" : m.Type})`,
+    );
+    const envNames = (cfg.Env ?? []).map((e: string) => e.split("=")[0]);
+    const policy = host.RestartPolicy?.Name || "no";
+    const out: { k: string; v: string }[] = [
+      { k: "Comando", v: cmd || "—" },
+      { k: "Directorio de trabajo", v: cfg.WorkingDir || "/" },
+      { k: "Creado", v: info.Created ? new Date(info.Created).toLocaleString("es") : "—" },
+      { k: "Política de reinicio", v: RESTART[policy] ?? policy },
+      { k: "Redes", v: networks.join(", ") || "—" },
+      { k: "Montajes", v: mounts.join("\n") || "—" },
+      { k: "Variables de entorno", v: envNames.join(", ") || "—" },
+    ];
+    if (container.compose_project) {
+      const svc = cfg.Labels?.["com.docker.compose.service"];
+      out.push({ k: "Compose", v: svc ? `${container.compose_project} · servicio ${svc}` : container.compose_project });
+    }
+    return out;
+  });
+
+  // ── header actions ──
+  async function headerAct(fn: () => Promise<unknown>, ok: string) {
+    if (await guard(fn, ok)) loadInspect();
+  }
+  async function stopIt() {
+    if (await askConfirm({ title: `¿Detener "${container.name}"?`, message: "El contenedor se detendrá; podrás volver a iniciarlo.", confirmText: "Detener" }))
+      headerAct(() => api.stopContainer(container.id), `${container.name} detenido`);
+  }
+  async function restartIt() {
+    if (await askConfirm({ title: `¿Reiniciar "${container.name}"?`, message: "Se detendrá y volverá a arrancar.", confirmText: "Reiniciar", danger: false }))
+      headerAct(() => api.restartContainer(container.id), `${container.name} reiniciado`);
+  }
+  async function removeIt() {
+    if (!(await askConfirm({ title: `¿Eliminar "${container.name}"?`, message: "Se borrará el contenedor (sus volúmenes con nombre se conservan). No se puede deshacer.", confirmText: "Eliminar" })))
+      return;
+    if (await guard(() => api.removeContainer(container.id, true), `${container.name} eliminado`)) onBack();
+  }
+  function openPort(port: number) {
+    api.openUrl(`http://localhost:${port}`).catch((e) => notify("error", String(e)));
+  }
+
   async function setTab(t: Tab) {
     tab = t;
-    if (t === "inspect" && !inspectJson) {
-      try {
-        inspectJson = JSON.stringify(await api.inspectContainer(container.id), null, 2);
-      } catch (e) {
-        inspectJson = String(e);
+    if (t === "inspect") loadInspect();
+    if (t === "terminal") {
+      if (!session) startTerminal();
+      else {
+        await tick();
+        xterm?.focus();
       }
     }
-    if (t === "terminal" && !session) startTerminal();
     if (t === "stats" && !statsTimer) startStats();
     if (t === "files" && browseEntries.length === 0) loadBrowse("/");
   }
 
   async function startLogs() {
     logLines = [];
-    logUnlisten = await listen<{ id: string; line: string }>("container-log", (e) => {
-      if (e.payload.id === container.id) {
-        logLines = [...logLines, e.payload.line].slice(-2000);
-      }
+    const un = await listen<{ id: string; line: string }>("container-log", (e) => {
+      if (e.payload.id !== container.id) return;
+      // Each Docker log frame already ends in "\n" and LogConsole joins lines with
+      // another one: split the frame and drop the trailing empty piece.
+      const chunk = e.payload.line.replace(/\r?\n$/, "").split(/\r?\n/);
+      logLines = [...logLines, ...chunk].slice(-2000);
     });
+    // The modal may have closed while we were subscribing.
+    if (destroyed) return un();
+    logUnlisten = un;
     try {
       await api.logsStart(container.id, "300");
+      if (destroyed) api.logsStop(container.id).catch(() => {});
     } catch (e) {
       notify("error", String(e));
     }
   }
 
   async function startTerminal() {
+    if (termStarting || session) return;
+    termStarting = true;
+    termMounted = true;
+    // Drop the listeners of a previous (finished) session so output isn't echoed twice.
+    execUnlisten?.();
+    execExitUnlisten?.();
+    execUnlisten = execExitUnlisten = undefined;
     termPending = [];
     xterm?.reset();
-    execUnlisten = await listen<{ session: string; line: string }>("exec-output", (e) => {
+    const unOut = await listen<{ session: string; line: string }>("exec-output", (e) => {
       if (e.payload.session === session) termWrite(e.payload.line);
     });
-    execExitUnlisten = await listen<string>("exec-exit", (e) => {
+    const unExit = await listen<string>("exec-exit", (e) => {
       if (e.payload === session) {
-        termWrite("\r\n\x1b[2m[sesión finalizada]\x1b[0m\r\n");
+        termWrite("\r\n\x1b[2m[sesión finalizada — vuelve a abrir la pestaña para otra]\x1b[0m\r\n");
         session = null;
       }
     });
+    if (destroyed) {
+      unOut();
+      unExit();
+      termStarting = false;
+      return;
+    }
+    execUnlisten = unOut;
+    execExitUnlisten = unExit;
     try {
-      session = await api.execStart(container.id, ["/bin/sh"]);
-      xterm?.focus();
+      const id = await api.execStart(container.id, ["/bin/sh"]);
+      if (destroyed) {
+        api.execKill(id).catch(() => {});
+      } else {
+        session = id;
+        xterm?.focus();
+      }
     } catch (e) {
       notify("error", String(e));
     }
+    termStarting = false;
   }
 
   // xterm forwards every keystroke raw to the shell — Ctrl+C, arrows (the shell's
@@ -152,31 +272,58 @@
   });
 
   function startStats() {
-    const tick = async () => {
+    // A stats sample itself takes ~1-2 s, so chain timeouts instead of an
+    // interval (ticks never overlap) and derive the I/O rates from the real
+    // elapsed time between samples.
+    const sample = async () => {
       try {
         const s = await api.containerStats(container.id);
+        if (destroyed) return;
+        const now = performance.now();
+        const dt = prevAt === null ? STATS_S : Math.max(0.25, (now - prevAt) / 1000);
+        prevAt = now;
+        histTimes = [...histTimes, now].slice(-HIST);
+        firstAt = histTimes[0];
+        prevAtView = now;
         stats = s;
-        // Keep rolling windows for the live graphs (net/disk plot per-tick rate).
-        cpuHist = [...cpuHist, s.cpu_percent].slice(-40);
-        memHist = [...memHist, s.mem_usage].slice(-40);
+        // Keep rolling windows for the live graphs (net/disk plot bytes per second).
+        cpuHist = [...cpuHist, s.cpu_percent].slice(-HIST);
+        memHist = [...memHist, s.mem_usage].slice(-HIST);
         const netTotal = s.net_rx + s.net_tx;
         const diskTotal = s.blk_read + s.blk_write;
-        if (prevNet !== null) netHist = [...netHist, Math.max(0, netTotal - prevNet)].slice(-40);
-        if (prevDisk !== null) diskHist = [...diskHist, Math.max(0, diskTotal - prevDisk)].slice(-40);
+        if (prevNet !== null) netHist = [...netHist, Math.max(0, netTotal - prevNet) / dt].slice(-HIST);
+        if (prevDisk !== null) diskHist = [...diskHist, Math.max(0, diskTotal - prevDisk) / dt].slice(-HIST);
         prevNet = netTotal;
         prevDisk = diskTotal;
       } catch {
         /* container may have stopped */
       }
+      if (!destroyed) statsTimer = setTimeout(sample, STATS_MS);
     };
-    tick();
-    statsTimer = setInterval(tick, STATS_MS);
+    statsTimer = setTimeout(sample, 0);
+  }
+
+  // Parse a limit field: "" → no change; accepts the Spanish decimal comma.
+  function parseLimit(raw: string): number | null | "invalid" {
+    const t = raw.trim().replace(",", ".");
+    if (t === "") return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n >= 0 ? n : "invalid";
   }
 
   async function applyLimits() {
+    const memRaw = parseLimit(memLimit);
+    const cpu = parseLimit(cpuLimit);
+    if (memRaw === "invalid" || cpu === "invalid") {
+      notify("error", "Escribe solo números en los límites (p. ej. 512 o 1,5).");
+      return;
+    }
+    const mem = memRaw === null ? null : Math.round(memRaw);
+    if (mem === null && cpu === null) {
+      notify("info", "No hay ningún límite que aplicar.");
+      return;
+    }
     applyingLimit = true;
-    const mem = memLimit.trim() === "" ? null : Math.max(0, Math.round(Number(memLimit)));
-    const cpu = cpuLimit.trim() === "" ? null : Math.max(0, Number(cpuLimit));
     try {
       await api.containerUpdateLimits(container.id, mem, cpu);
       notify("success", "Límites aplicados");
@@ -207,6 +354,11 @@
     const base = browsePath === "/" ? "" : browsePath.replace(/\/$/, "");
     loadBrowse(`${base}/${name}`);
   }
+  // Clickable path segments for the file browser breadcrumb.
+  let pathParts = $derived.by(() => {
+    const parts = browsePath.split("/").filter(Boolean);
+    return parts.map((name, i) => ({ name, path: "/" + parts.slice(0, i + 1).join("/") }));
+  });
   function goUp() {
     if (browsePath === "/") return;
     const parts = browsePath.replace(/\/$/, "").split("/");
@@ -260,9 +412,8 @@
       const base = browsePath === "/" ? "" : browsePath.replace(/\/$/, "");
       // A single plain file downloads as-is; a folder (or any multi-select) is zipped.
       if (items.length === 1 && !items[0].is_dir) {
-        const b64 = await api.containerDownload(container.id, `${base}/${items[0].name}`, false);
-        await api.writeHostFile(joinHost(destDir, items[0].name), Array.from(b64ToBytes(b64)));
-        notify("success", `Descargado: ${items[0].name}`);
+        const n = await api.containerDownloadToHost(container.id, `${base}/${items[0].name}`, joinHost(destDir, items[0].name));
+        notify("success", `Descargado: ${items[0].name} (${bytes(n)})`);
       } else {
         const entries: ArchiveFile[] = [];
         for (const it of items) {
@@ -296,41 +447,108 @@
     logUnlisten?.();
     execUnlisten?.();
     execExitUnlisten?.();
-    if (statsTimer) clearInterval(statsTimer);
+    destroyed = true;
+    if (statsTimer) clearTimeout(statsTimer);
     api.logsStop(container.id).catch(() => {});
     if (session) api.execKill(session).catch(() => {});
   }
 </script>
 
-<Modal title={container.name} {onClose}>
-  <div class="btn-row detail-tabs">
-    <button class="btn {tab === 'logs' ? 'primary' : ''}" onclick={() => setTab("logs")}>Logs</button>
-    <button class="btn {tab === 'terminal' ? 'primary' : ''}" onclick={() => setTab("terminal")}>Terminal</button>
-    <button class="btn {tab === 'stats' ? 'primary' : ''}" onclick={() => setTab("stats")}>Recursos</button>
-    <button class="btn {tab === 'files' ? 'primary' : ''}" onclick={() => setTab("files")}>Archivos</button>
-    <button class="btn {tab === 'inspect' ? 'primary' : ''}" onclick={() => setTab("inspect")}>Inspeccionar</button>
+<div class="page-head" style="padding-bottom:0;gap:12px">
+  <nav class="crumbs" aria-label="Ruta" style="flex-basis:100%">
+    <button onclick={onBack}>Contenedores</button>
+    {#if container.compose_project}
+      <span class="sep">/</span><span>{container.compose_project}</span>
+    {/if}
+    <span class="sep">/</span><span class="here">{container.name}</span>
+  </nav>
+
+  <h2 class="ellip" style="max-width:min(520px, 60vw)">{container.name}</h2>
+  <span class="badge {st.kind}" title={container.status}>
+    <span class="b-dot"></span>{st.label}{#if stateSince(container)} · {stateSince(container)}{/if}
+  </span>
+  <div class="grow"></div>
+  {#if webPort}
+    <button class="btn" onclick={() => openPort(webPort.port)}><Icon name="external" /> Abrir localhost:{webPort.port}</button>
+  {/if}
+  {#if running}
+    <button class="btn" onclick={restartIt}><Icon name="restart" /> Reiniciar</button>
+    <button class="btn" onclick={stopIt}><Icon name="stop" /> Detener</button>
+  {:else if container.state === "paused"}
+    <button class="btn ok" onclick={() => headerAct(() => api.unpauseContainer(container.id), `${container.name} reanudado`)}><Icon name="play" /> Reanudar</button>
+  {:else}
+    <button class="btn ok" onclick={() => headerAct(() => api.startContainer(container.id), `${container.name} iniciado`)}><Icon name="play" /> Iniciar</button>
+  {/if}
+  <button class="btn icon danger" title="Eliminar contenedor" aria-label="Eliminar {container.name}" onclick={removeIt}><Icon name="trash" /></button>
+
+  <dl class="meta" style="flex-basis:100%">
+    <div><dt>Imagen</dt><dd class="mono">{container.image}</dd></div>
+    <div>
+      <dt>ID</dt>
+      <dd style="display:flex;align-items:center;gap:4px">
+        <span class="mono">{shortId(container.id)}</span>
+        <button class="btn icon ghost" style="width:28px;min-height:28px" title="Copiar ID completo" aria-label="Copiar ID completo" onclick={() => copyText(container.id, "ID del contenedor copiado")}><Icon name="copy" /></button>
+      </dd>
+    </div>
+    {#if ports.length}
+      <div><dt>Puertos</dt><dd class="mono">{ports.map((p) => p.label).join(", ")}</dd></div>
+    {/if}
+    {#if networks.length}
+      <div><dt>Red</dt><dd>{networks.join(", ")}</dd></div>
+    {/if}
+  </dl>
+
+  <div class="tabs" role="tablist" aria-label="Secciones del contenedor" style="flex-basis:calc(100% + 64px)">
+    <button role="tab" aria-selected={tab === "logs"} onclick={() => setTab("logs")}>Logs</button>
+    <button role="tab" aria-selected={tab === "terminal"} onclick={() => setTab("terminal")} disabled={!running} title={running ? "" : "Inicia el contenedor para abrir una terminal"}>Terminal</button>
+    <button role="tab" aria-selected={tab === "stats"} onclick={() => setTab("stats")}>Recursos</button>
+    <button role="tab" aria-selected={tab === "files"} onclick={() => setTab("files")} disabled={!running} title={running ? "" : "Inicia el contenedor para explorar sus archivos"}>Archivos</button>
+    <button role="tab" aria-selected={tab === "inspect"} onclick={() => setTab("inspect")}>Inspeccionar</button>
   </div>
+</div>
+
+<div role="tabpanel">
+  <!-- The terminal stays mounted once opened (just hidden) so its output keeps
+       rendering while another tab is visible. -->
+  {#if termMounted}
+    <div hidden={tab !== "terminal"}>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:13px;color:var(--text-2)">
+        <span class="dot {session ? 'up' : ''}" style="box-shadow:none"></span>
+        {session ? "Conectado a /bin/sh" : "Sesión finalizada"}
+        <div style="flex:1"></div>
+        {#if !session && running}
+          <button class="btn" onclick={startTerminal}>Nueva sesión</button>
+        {/if}
+      </div>
+      <div style="height:calc(100vh - 380px);min-height:320px">
+        <XTerm bind:this={xterm} ondata={onTermData} />
+      </div>
+      <p style="color:var(--faint);font-size:12.5px;margin:8px 0 0">
+        Terminal interactiva: Ctrl+C, historial con ↑/↓, <code>top</code>, <code>vim</code> y <code>nano</code> funcionan como en una consola normal.
+      </p>
+    </div>
+  {/if}
 
   {#if tab === "logs"}
-    <div style="height:46vh"><LogConsole lines={logLines} placeholder="Esperando logs…" /></div>
+    <div class="toolbar" style="justify-content:flex-end;margin-bottom:10px">
+      <span style="flex:1;color:var(--muted);font-size:12.5px">Últimas {logLines.length} líneas · siguiendo en vivo</span>
+      <button class="btn" onclick={() => copyText(logLines.join("\n"), "Logs copiados")} disabled={!logLines.length}><Icon name="copy" /> Copiar</button>
+      <button class="btn ghost" onclick={() => (logLines = [])} disabled={!logLines.length}>Limpiar</button>
+    </div>
+    <div style="height:calc(100vh - 360px);min-height:300px"><LogConsole lines={logLines} placeholder="Esperando logs…" /></div>
   {:else if tab === "terminal"}
-    <div style="height:440px">
-      <XTerm bind:this={xterm} ondata={onTermData} />
-    </div>
-    <div style="color:var(--faint);font-size:12px;margin-top:8px">
-      Terminal interactiva — funcionan Ctrl+C, ↑/↓ (historial del shell), <code>top</code>/<code>htop</code>, <code>vim</code> y <code>nano</code>.
-    </div>
+    <!-- rendered above -->
   {:else if tab === "stats"}
     {#if stats}
       <div class="grid stats-grid">
         <div class="card">
           <div class="label"><span class="card-ic"><Icon name="cpu" size={14} /></span> CPU</div>
           <div class="value">{stats.cpu_percent.toFixed(1)}<small>%</small></div>
-          <Sparkline data={cpuHist} max={100} peakLabel="100%" spanLabel="~100 s" />
+          <Sparkline data={cpuHist} max={cpuMax} peakLabel="{Math.round(cpuMax)}%" {spanLabel} />
         </div>
         <div class="card">
           <div class="label"><span class="card-ic"><Icon name="ram" size={14} /></span> Memoria</div>
-          <div class="value" style="font-size:19px">
+          <div class="value" style="font-size:22px">
             {bytes(stats.mem_usage)}<small> / {stats.mem_limit ? bytes(stats.mem_limit) : "∞"}</small>
           </div>
           <Sparkline
@@ -338,97 +556,120 @@
             max={stats.mem_limit || undefined}
             color="var(--accent-2)"
             peakLabel={stats.mem_limit ? bytes(stats.mem_limit) : bytes(memPeak)}
-            spanLabel="~100 s"
+            {spanLabel}
           />
         </div>
         <div class="card">
-          <div class="label"><span class="card-ic"><Icon name="network" size={14} /></span> Red I/O</div>
-          <div class="value" style="font-size:17px">{bytes(netRate)}<small>/s</small></div>
-          <div style="color:var(--faint);font-size:11.5px;margin-top:2px">
-            ↓ {bytes(stats.net_rx)} · ↑ {bytes(stats.net_tx)} totales
-          </div>
-          <Sparkline data={netHist} color="var(--ok)" peakLabel={bytes(netPeak) + "/s"} spanLabel="~100 s" />
+          <div class="label"><span class="card-ic"><Icon name="network" size={14} /></span> Red</div>
+          <div class="value" style="font-size:22px">{bytes(netRate)}<small>/s</small></div>
+          <div class="sub">↓ {bytes(stats.net_rx)} · ↑ {bytes(stats.net_tx)} en total</div>
+          <Sparkline data={netHist} color="var(--ok)" peakLabel={bytes(netPeak) + "/s"} {spanLabel} />
         </div>
         <div class="card">
-          <div class="label"><span class="card-ic"><Icon name="disk" size={14} /></span> Disco I/O</div>
-          <div class="value" style="font-size:17px">{bytes(diskRate)}<small>/s</small></div>
-          <div style="color:var(--faint);font-size:11.5px;margin-top:2px">
-            {bytes(stats.blk_read)} lect · {bytes(stats.blk_write)} escr
-          </div>
-          <Sparkline data={diskHist} color="var(--warn)" peakLabel={bytes(diskPeak) + "/s"} spanLabel="~100 s" />
+          <div class="label"><span class="card-ic"><Icon name="disk" size={14} /></span> Disco</div>
+          <div class="value" style="font-size:22px">{bytes(diskRate)}<small>/s</small></div>
+          <div class="sub">{bytes(stats.blk_read)} leídos · {bytes(stats.blk_write)} escritos</div>
+          <Sparkline data={diskHist} color="var(--warn)" peakLabel={bytes(diskPeak) + "/s"} {spanLabel} />
         </div>
       </div>
+    {:else if !running}
+      <div class="empty">El contenedor no está en ejecución: no hay consumo que medir.</div>
     {:else}
-      <div class="empty">Midiendo…</div>
+      <div class="empty"><span class="spinner"></span>Midiendo…</div>
     {/if}
 
-    <div class="card" style="margin-top:14px">
-      <div class="label" style="margin-bottom:10px">Límites de recursos</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+    <section class="card" style="margin-top:14px" aria-labelledby="lim-h">
+      <h3 id="lim-h">Límites de recursos</h3>
+      <p style="margin:4px 0 14px;color:var(--muted);font-size:13px">
+        Evita que un contenedor con fuga de memoria se coma la RAM del motor (se reinicia o se detiene al llegar al tope). Deja un campo vacío para no cambiarlo.
+      </p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
         <div class="field" style="margin:0">
-          <label for="mem">Memoria máx. (MB)</label>
-          <input id="mem" type="text" inputmode="numeric" placeholder="p. ej. 512" bind:value={memLimit} style="width:140px" />
+          <label for="mem">Memoria máxima (MB)</label>
+          <input id="mem" type="text" inputmode="numeric" placeholder="sin límite" bind:value={memLimit} style="width:150px" />
         </div>
         <div class="field" style="margin:0">
-          <label for="cpu">CPU máx. (cores)</label>
-          <input id="cpu" type="text" inputmode="decimal" placeholder="p. ej. 1.5" bind:value={cpuLimit} style="width:140px" />
+          <label for="cpu">CPU máxima (núcleos)</label>
+          <input id="cpu" type="text" inputmode="decimal" placeholder="sin límite" bind:value={cpuLimit} style="width:150px" />
         </div>
-        <button class="btn primary" onclick={applyLimits} disabled={applyingLimit}>
-          {#if applyingLimit}<span class="spinner"></span>{/if} Aplicar
+        <button class="btn primary lg" onclick={applyLimits} disabled={applyingLimit}>
+          {#if applyingLimit}<span class="spinner"></span>{/if} Aplicar límites
         </button>
       </div>
-      <div style="color:var(--faint);font-size:12px;margin-top:8px">
-        Evita que un contenedor con fuga de memoria se coma toda la RAM (se reinicia/mata al llegar al tope). Usa 0 para quitar el límite.
-      </div>
-    </div>
+    </section>
   {:else if tab === "files"}
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <button class="btn" onclick={goUp} disabled={browsePath === "/"}>↑ Arriba</button>
-      <span class="mono" style="color:var(--muted);user-select:text;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">{browsePath}</span>
-      {#if browseLoading}<span class="spinner"></span>{/if}
+    <div class="toolbar" style="margin-bottom:10px">
+      <nav class="crumbs mono" aria-label="Ruta en el contenedor" style="flex:1 1 260px;min-width:0;font-size:13px">
+        <button onclick={() => loadBrowse("/")}>/</button>
+        {#each pathParts as part, i (part.path)}
+          {#if i < pathParts.length - 1}
+            <button onclick={() => loadBrowse(part.path)}>{part.name}</button><span class="sep">/</span>
+          {:else}
+            <span class="here">{part.name}</span>
+          {/if}
+        {/each}
+        {#if browseLoading}<span class="spinner" style="margin-left:6px"></span>{/if}
+      </nav>
+      <button class="btn" onclick={goUp} disabled={browsePath === "/"}>Subir un nivel</button>
       {#if selectedEntries.length}
-        <button class="btn ok" onclick={downloadSel} disabled={downloading}>
-          {#if downloading}<span class="spinner"></span>{/if} Descargar ({selectedEntries.length})
+        <button class="btn" onclick={downloadSel} disabled={downloading}>
+          {#if downloading}<span class="spinner"></span>{:else}<Icon name="download" />{/if} Descargar ({selectedEntries.length})
         </button>
       {/if}
       <button class="btn primary" onclick={uploadHere} disabled={uploading}>
-        {#if uploading}<span class="spinner"></span>{/if} Subir archivo
+        {#if uploading}<span class="spinner"></span>{:else}<Icon name="upload" />{/if} Subir archivo
       </button>
     </div>
-    <div class="file-list" style="max-height:44vh">
+    <div class="file-list" style="max-height:calc(100vh - 360px)">
       {#if browseEntries.length === 0 && !browseLoading}
         <div style="padding:14px;color:var(--faint)">Carpeta vacía o sin acceso.</div>
       {/if}
       {#each browseEntries as f (f.name)}
-        <div class="file-row {f.is_dir ? '' : 'file'}">
+        <div class="file-row {f.is_dir ? '' : 'file'}" style={sel[f.name] ? "background:#14231f" : ""}>
           <label style="display:flex;align-items:center;padding:0 2px 0 12px;cursor:pointer">
             <input
               type="checkbox"
               checked={!!sel[f.name]}
               onchange={() => (sel = { ...sel, [f.name]: !sel[f.name] })}
-              style="cursor:pointer"
               aria-label="Seleccionar {f.name}"
             />
           </label>
           {#if f.is_dir}
             <button class="file-main" onclick={() => enterDir(f.name)} title={f.name}>
-              <span class="file-ic">📁</span>
+              <span class="file-ic" style="color:var(--accent-2)"><Icon name="folder" size={16} /></span>
               <span class="file-name dir">{f.name}</span>
             </button>
           {:else}
             <div class="file-main" title={f.name}>
-              <span class="file-ic">📄</span>
+              <span class="file-ic" style="color:var(--muted)"><Icon name="file" size={16} /></span>
               <span class="file-name">{f.name}</span>
               {#if fileExt(f.name)}<span class="file-ext">{fileExt(f.name)}</span>{/if}
             </div>
           {/if}
-          <button class="file-del" title="Borrar del contenedor" aria-label="Borrar" onclick={() => removeEntry(f)}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
+          <button class="file-del" title="Borrar del contenedor" aria-label="Borrar {f.name}" onclick={() => removeEntry(f)}>
+            <Icon name="trash" size={15} />
           </button>
         </div>
       {/each}
     </div>
   {:else}
-    <pre class="json" style="max-height:58vh">{inspectJson || "Cargando…"}</pre>
+    <div class="toolbar" style="justify-content:flex-end;margin-bottom:10px">
+      <button class="btn" onclick={() => (showJson = !showJson)} aria-pressed={showJson}>
+        <Icon name="braces" /> {showJson ? "Ver resumen" : "Ver JSON completo"}
+      </button>
+      <button class="btn" onclick={() => copyText(inspectJson, "JSON copiado")} disabled={!inspectJson}><Icon name="copy" /> Copiar JSON</button>
+    </div>
+    {#if !info}
+      <div class="empty"><span class="spinner"></span>Cargando…</div>
+    {:else if showJson}
+      <pre class="json" style="max-height:calc(100vh - 340px)">{inspectJson}</pre>
+    {:else}
+      <dl class="facts">
+        {#each facts as f (f.k)}
+          <dt>{f.k}</dt>
+          <dd style="white-space:pre-line">{f.v}</dd>
+        {/each}
+      </dl>
+    {/if}
   {/if}
-</Modal>
+</div>

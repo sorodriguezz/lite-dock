@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { route, engine } from "./lib/stores";
+  import { route, engine, notify } from "./lib/stores";
   import { api } from "./lib/api";
   import Sidebar from "./lib/components/Sidebar.svelte";
-  import TopBar from "./lib/components/TopBar.svelte";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import Toasts from "./lib/components/Toasts.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
@@ -18,6 +17,7 @@
   import Configuracion from "./lib/views/Configuracion.svelte";
 
   let phase = $state<"loading" | "setup" | "ready">("loading");
+  let bootMsg = $state("Comprobando el motor…");
   let poll: ReturnType<typeof setInterval> | undefined;
 
   async function boot() {
@@ -36,13 +36,15 @@
     try {
       const d = await api.setupDetect();
       if (d.wsl2_ready && d.distro_imported) {
+        bootMsg = "Iniciando el motor… (puede tardar hasta un minuto)";
         try {
           await api.engineStart();
           engine.set(await api.engineStatus());
           phase = "ready";
           return;
-        } catch {
-          /* fall through to wizard */
+        } catch (e) {
+          // Say why we fall back to the wizard instead of failing silently.
+          notify("error", `No se pudo iniciar el motor automáticamente: ${e}`);
         }
       }
     } catch {
@@ -74,8 +76,11 @@
 </script>
 
 {#if phase === "loading"}
-  <div class="firstrun">
-    <div class="spinner" style="width:28px;height:28px"></div>
+  <div class="firstrun" role="status" aria-live="polite">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+      <div class="spinner" style="width:28px;height:28px"></div>
+      <span style="color:var(--muted);font-size:13px">{bootMsg}</span>
+    </div>
   </div>
 {:else if phase === "setup"}
   <FirstRun {onReady} />
@@ -83,7 +88,6 @@
   <div class="shell">
     <Sidebar />
     <div class="main">
-      <TopBar />
       <div class="content">
         {#if $route === "dashboard"}
           <Dashboard />

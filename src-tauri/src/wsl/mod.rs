@@ -3,6 +3,7 @@
 pub mod bootstrap;
 pub mod detect;
 pub mod lifecycle;
+mod usage;
 
 use crate::error::{AppError, AppResult};
 use tokio::process::Command;
@@ -28,10 +29,33 @@ pub async fn run_wsl(args: &[&str]) -> AppResult<(bool, String, String)> {
         .args(args)
         .output()
         .await
-        .map_err(|e| AppError::WslUnavailable(format!("could not run wsl.exe: {e}")))?;
+        .map_err(|e| AppError::WslUnavailable(format!("no se pudo ejecutar wsl.exe: {e}")))?;
     let stdout = decode_console(&output.stdout);
     let stderr = decode_console(&output.stderr);
     Ok((output.status.success(), stdout, stderr))
+}
+
+/// Read one line from a child-process pipe, decoding it lossily so a non-UTF-8
+/// byte (e.g. Windows PowerShell's OEM code page) can't end the stream the way
+/// `lines()` does. The trailing `\n` / `\r\n` is stripped. `None` at EOF/error.
+pub async fn read_line_lossy<R>(reader: &mut R, buf: &mut Vec<u8>) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    buf.clear();
+    match reader.read_until(b'\n', buf).await {
+        Ok(0) | Err(_) => None,
+        Ok(_) => {
+            if buf.ends_with(b"\n") {
+                buf.pop();
+                if buf.ends_with(b"\r") {
+                    buf.pop();
+                }
+            }
+            Some(String::from_utf8_lossy(buf).into_owned())
+        }
+    }
 }
 
 /// Decode bytes that may be UTF-16LE (wsl.exe management output) or UTF-8
@@ -149,24 +173,26 @@ fn read_user_docker_host() -> String {
     }
 }
 
-/// Make sure the Windows `docker` CLI points at LiteDock's path-translation
-/// proxy — automatically, so the user never has to set `DOCKER_HOST` by hand.
-/// We (re)set it when it is unset, malformed, or points at ANY local endpoint:
-/// a fresh install (empty), the old direct port (`:23750`), or a half-typed
-/// value like just `23752`. A genuine remote Docker endpoint (a real dotted /
-/// remote host) is left untouched. Runs once at startup.
+/// Repair a stale LiteDock `DOCKER_HOST` (e.g. the old direct engine port
+/// `tcp://127.0.0.1:23750`, a `localhost` variant, or a half-typed `23752`) so
+/// it points at the path-translation proxy again. Only rewrites values that are
+/// clearly LiteDock's: an unset `DOCKER_HOST` is left alone (the CLI is opt-in
+/// and the user may have disabled it, or rely on Docker Desktop's default), as
+/// is any other endpoint. Runs once at startup.
 pub fn heal_docker_host() {
     let proxy_url = crate::config::engine_tcp_url();
     let raw = read_user_docker_host();
     let v = raw.trim();
-    if v == proxy_url.as_str() {
-        return; // already correct — nothing to do
+    if v.is_empty() || v == proxy_url.as_str() {
+        return; // not enabled, or already correct — nothing to do
     }
-    let is_local_or_bad = v.is_empty()
-        || v.contains("127.0.0.1")
+    let litedock_port = [crate::config::ENGINE_PORT, crate::config::ENGINE_PROXY_PORT]
+        .iter()
+        .any(|p| v.contains(&p.to_string()));
+    let local = v.contains("127.0.0.1")
         || v.contains("localhost")
-        || !v.contains('.'); // bare port / malformed / no real host
-    if is_local_or_bad {
+        || v.chars().all(|c| c.is_ascii_digit()); // bare port
+    if litedock_port && local {
         set_docker_host();
     }
 }
@@ -185,46 +211,8 @@ pub fn terminate_sync() {
     let _ = c.status();
 }
 
-/// Approximate footprint of LiteDock itself: (cpu_percent, ram_bytes), summing
-/// our process + its direct children (WebView2) + the WSL engine VM (vmmem).
-/// Best-effort via PowerShell; returns (0, 0) if the probe can't run.
-pub async fn app_usage() -> (f64, u64) {
-    let own = std::process::id();
-    let script = format!(
-        "$ErrorActionPreference='SilentlyContinue'; $ids=@({own}); \
-Get-CimInstance Win32_Process -Filter 'ParentProcessId={own}' | ForEach-Object {{ $ids += $_.ProcessId }}; \
-$vmName=if(Get-Process -Name vmmemWSL){{ 'vmmemWSL' }}else{{ 'Vmmem' }}; \
-$a1=@(Get-Process -Id $ids)+@(Get-Process -Name $vmName); \
-$ram=($a1 | Measure-Object WorkingSet64 -Sum).Sum; \
-$c1=($a1 | Measure-Object CPU -Sum).Sum; \
-Start-Sleep -Milliseconds 400; \
-$a2=@(Get-Process -Id $ids)+@(Get-Process -Name $vmName); \
-$c2=($a2 | Measure-Object CPU -Sum).Sum; \
-$cores=[Environment]::ProcessorCount; \
-$pct=if($cores -gt 0){{ (($c2-$c1)/0.4/$cores)*100 }}else{{ 0 }}; \
-[string]::Format([Globalization.CultureInfo]::InvariantCulture,'{{0:0.0}}|{{1}}',$pct,[int64]$ram)"
-    );
-    match command("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .await
-    {
-        Ok(o) => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let mut it = s.trim().split('|');
-            let cpu = it
-                .next()
-                .and_then(|x| x.trim().replace(',', ".").parse::<f64>().ok())
-                .unwrap_or(0.0);
-            let ram = it
-                .next()
-                .and_then(|x| x.trim().parse::<u64>().ok())
-                .unwrap_or(0);
-            (cpu, ram)
-        }
-        Err(_) => (0.0, 0),
-    }
-}
+// App footprint (sidebar meter): measured in-process, see `usage.rs`.
+pub use usage::app_usage;
 
 // ─────────────────────────── .wslconfig (memory) ───────────────────────────
 
@@ -256,55 +244,7 @@ fn parse_ini(content: &str) -> Vec<(String, Vec<(String, String)>)> {
     sections
 }
 
-fn render_ini(sections: &[(String, Vec<(String, String)>)]) -> String {
-    let mut out = String::new();
-    for (name, kvs) in sections {
-        if kvs.is_empty() {
-            continue; // skip empty sections (including an empty global area)
-        }
-        if !name.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&format!("[{name}]\n"));
-        }
-        for (k, v) in kvs {
-            out.push_str(&format!("{k}={v}\n"));
-        }
-    }
-    out
-}
-
-/// Set/replace (or remove, if `value` is None) a key under a section.
-fn ini_set(
-    sections: &mut Vec<(String, Vec<(String, String)>)>,
-    section: &str,
-    key: &str,
-    value: Option<String>,
-) {
-    let sidx = sections
-        .iter()
-        .position(|(n, _)| n.eq_ignore_ascii_case(section));
-    let sidx = match (sidx, &value) {
-        (Some(i), _) => i,
-        (None, Some(_)) => {
-            sections.push((section.to_string(), Vec::new()));
-            sections.len() - 1
-        }
-        (None, None) => return,
-    };
-    let kvs = &mut sections[sidx].1;
-    let kidx = kvs.iter().position(|(k, _)| k.eq_ignore_ascii_case(key));
-    match (kidx, value) {
-        (Some(i), Some(v)) => kvs[i].1 = v,
-        (Some(i), None) => {
-            kvs.remove(i);
-        }
-        (None, Some(v)) => kvs.push((key.to_string(), v)),
-        (None, None) => {}
-    }
-}
-
+/// First value of `key` in `[section]` (a section may appear more than once).
 fn ini_get<'a>(
     sections: &'a [(String, Vec<(String, String)>)],
     section: &str,
@@ -312,11 +252,90 @@ fn ini_get<'a>(
 ) -> Option<&'a str> {
     sections
         .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(section))?
-        .1
-        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case(section))
+        .flat_map(|(_, kvs)| kvs.iter())
         .find(|(k, _)| k.eq_ignore_ascii_case(key))
         .map(|(_, v)| v.as_str())
+}
+
+/// Set (or, with `value = None`, remove) `key` in `[section]` by editing the
+/// file text line by line: comments, blank lines, unrelated keys and sections
+/// are kept verbatim (and the user's spelling of the key). A missing key goes
+/// after the last entry of the first such section; a missing section is
+/// appended at the end. Duplicates of the key in that section are dropped so
+/// the value LiteDock writes is the one WSL uses.
+fn ini_upsert(content: &str, section: &str, key: &str, value: Option<&str>) -> String {
+    let nl = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let header = |l: &str| {
+        let t = l.trim();
+        (t.starts_with('[') && t.ends_with(']')).then(|| t[1..t.len() - 1].trim().to_string())
+    };
+    let key_of = |l: &str| {
+        let t = l.trim_start();
+        if t.starts_with('#') || t.starts_with(';') {
+            return None;
+        }
+        t.split_once('=').map(|(k, _)| k.trim().to_string())
+    };
+
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let mut in_section = false;
+    let mut in_first = false;
+    let mut insert_at: Option<usize> = None;
+    let mut done = false;
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(name) = header(&lines[i]) {
+            in_section = name.eq_ignore_ascii_case(section);
+            in_first = in_section && insert_at.is_none();
+            if in_first {
+                insert_at = Some(i + 1);
+            }
+            i += 1;
+            continue;
+        }
+        if in_section {
+            if let Some(k) = key_of(&lines[i]).filter(|k| k.eq_ignore_ascii_case(key)) {
+                match value {
+                    Some(v) if !done => {
+                        let indent_len = lines[i].len() - lines[i].trim_start().len();
+                        lines[i] = format!("{}{k}={v}", &lines[i][..indent_len]);
+                        done = true;
+                    }
+                    _ => {
+                        lines.remove(i); // removal, or a duplicate
+                        continue;
+                    }
+                }
+            }
+            if in_first && !lines[i].trim().is_empty() {
+                insert_at = Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+
+    if let (Some(v), false) = (value, done) {
+        match insert_at {
+            Some(at) => lines.insert(at, format!("{key}={v}")),
+            None => {
+                if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(format!("[{section}]"));
+                lines.push(format!("{key}={v}"));
+            }
+        }
+    }
+    let mut out = lines.join(nl);
+    if !out.is_empty() {
+        out.push_str(nl);
+    }
+    out
 }
 
 fn parse_mem_to_mb(v: &str) -> Option<u32> {
@@ -346,7 +365,7 @@ pub fn read_wsl_config() -> (Option<u32>, bool) {
     let Ok(content) = std::fs::read_to_string(&path) else {
         return (None, false);
     };
-    let sections = parse_ini(&content);
+    let sections = parse_ini(content.trim_start_matches('\u{feff}'));
     let mem = ini_get(&sections, "wsl2", "memory").and_then(parse_mem_to_mb);
     let reclaim = ini_get(&sections, "experimental", "autoMemoryReclaim")
         .map(|v| !v.eq_ignore_ascii_case("disabled"))
@@ -354,30 +373,36 @@ pub fn read_wsl_config() -> (Option<u32>, bool) {
     (mem, reclaim)
 }
 
-/// Merge the memory cap + autoMemoryReclaim into `.wslconfig`, preserving every
-/// other key the user may have. `memory_mb = None` removes the cap.
+/// Set the memory cap (`[wsl2] memory`) + `[experimental] autoMemoryReclaim` in
+/// `.wslconfig`, editing it in place: every other line (comments, blank lines,
+/// other keys/sections) is kept as is. `memory_mb = None` removes the cap.
 pub fn write_wsl_config(memory_mb: Option<u32>, auto_reclaim: bool) -> AppResult<()> {
     let path = wsl_config_path()
         .ok_or_else(|| AppError::other("no se encontró el perfil de usuario".to_string()))?;
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut sections = parse_ini(&content);
-    ini_set(
-        &mut sections,
-        "wsl2",
-        "memory",
-        memory_mb.map(|m| format!("{m}MB")),
-    );
-    ini_set(
-        &mut sections,
+    // Never start from scratch over a file we couldn't read (e.g. UTF-16):
+    // that would wipe the user's settings.
+    let content = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| {
+            AppError::other(
+                "no se pudo leer .wslconfig: guárdalo como UTF-8 e inténtalo de nuevo".to_string(),
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(AppError::other(format!("no se pudo leer .wslconfig: {e}"))),
+    };
+    let (bom, body) = match content.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", content.as_str()),
+    };
+    let memory = memory_mb.map(|m| format!("{m}MB"));
+    let body = ini_upsert(body, "wsl2", "memory", memory.as_deref());
+    let body = ini_upsert(
+        &body,
         "experimental",
         "autoMemoryReclaim",
-        if auto_reclaim {
-            Some("gradual".to_string())
-        } else {
-            None
-        },
+        auto_reclaim.then_some("gradual"),
     );
-    std::fs::write(&path, render_ini(&sections))
+    std::fs::write(&path, format!("{bom}{body}"))
         .map_err(|e| AppError::other(format!("no se pudo escribir .wslconfig: {e}")))?;
     Ok(())
 }
@@ -441,16 +466,95 @@ pub async fn list_distros() -> Vec<String> {
     }
 }
 
-/// True if our `docker` shim is installed in `distro`.
-pub async fn integration_status(distro: &str) -> bool {
+/// The WSL distros that are running right now (`wsl --list --running`).
+async fn running_distros() -> Vec<String> {
+    match run_wsl(&["--list", "--running", "--quiet"]).await {
+        Ok((_ok, out, _)) => out
+            .lines()
+            .map(|l| {
+                l.trim_matches(|c: char| c.is_whitespace() || c == '\u{0}')
+                    .to_string()
+            })
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Whether our `docker` shim is in `distro`: `None` if the probe itself failed.
+/// Note: `wsl -d` boots the distro if it was stopped.
+async fn shim_state(distro: &str) -> Option<bool> {
     match run_in_distro(
         distro,
         "grep -q litedock /usr/local/bin/docker 2>/dev/null && echo yes || echo no",
     )
     .await
     {
-        Ok((_ok, out, _)) => out.contains("yes"),
-        Err(_) => false,
+        // Exact lines only: wsl.exe's own errors (e.g. "...not received...")
+        // land on stdout too and must not read as a "no".
+        Ok((_ok, out, _)) => out
+            .lines()
+            .map(str::trim)
+            .find(|l| *l == "yes" || *l == "no")
+            .map(|l| l == "yes"),
+        Err(_) => None,
+    }
+}
+
+/// True if our `docker` shim is installed in `distro`. Also syncs the record of
+/// integrated distros (adopts shims installed before the record existed, drops
+/// removed ones) — the settings UI probes every distro through this anyway.
+pub async fn integration_check(distro: &str) -> bool {
+    let state = shim_state(distro).await;
+    match state {
+        // Unknown revision (0) → refreshed once by the next startup repair.
+        Some(true) => update_integrations(|r| {
+            if r.distros.contains_key(distro) {
+                return false;
+            }
+            r.distros.insert(distro.to_string(), 0);
+            true
+        }),
+        Some(false) => update_integrations(|r| r.distros.remove(distro).is_some()),
+        None => {}
+    }
+    state.unwrap_or(false)
+}
+
+/// Bump whenever the shim installed by `integration_enable` changes: the next
+/// startup then refreshes it once in every distro integrated with an older one.
+const INTEGRATION_REV: u32 = 1;
+
+/// Distros where LiteDock installed its shim → shim revision. Persisted in
+/// `config::integrations_file()`; absent on installs from before it existed.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct IntegrationRecord {
+    #[serde(default)]
+    distros: std::collections::BTreeMap<String, u32>,
+}
+
+/// The record, or `None` if there is none yet (or it is unreadable).
+fn load_integrations() -> Option<IntegrationRecord> {
+    let raw = std::fs::read(crate::config::integrations_file()).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+/// Read-modify-write the record; `f` returns whether it changed anything
+/// (only then is the file written). Serialised: the UI probes distros in parallel.
+fn update_integrations(f: impl FnOnce(&mut IntegrationRecord) -> bool) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let existed = load_integrations();
+    let created = existed.is_none();
+    let mut record = existed.unwrap_or_default();
+    if f(&mut record) || created {
+        let path = crate::config::integrations_file();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_vec_pretty(&record) {
+            let _ = std::fs::write(&path, json);
+        }
     }
 }
 
@@ -493,6 +597,9 @@ EOF"#;
     let script = template.replace("__PORT__", &crate::config::ENGINE_PORT.to_string());
     let (ok, _o, err) = run_in_distro(distro, &script).await?;
     if ok {
+        update_integrations(|r| {
+            r.distros.insert(distro.to_string(), INTEGRATION_REV) != Some(INTEGRATION_REV)
+        });
         Ok(())
     } else {
         Err(AppError::other(format!(
@@ -509,6 +616,7 @@ pub async fn integration_disable(distro: &str) -> AppResult<()> {
     )
     .await?;
     if ok {
+        update_integrations(|r| r.distros.remove(distro).is_some());
         Ok(())
     } else {
         Err(AppError::other(format!(
@@ -517,19 +625,60 @@ pub async fn integration_disable(distro: &str) -> AppResult<()> {
     }
 }
 
-/// On startup, refresh the docker integration in any distro we previously set up
-/// — so an out-of-date or broken shim (e.g. an old `wsl.exe`-forwarding one that
-/// fails with "MZ: not found") gets replaced by the current mechanism, with no
-/// user action. Runs once per session, best-effort, in the background.
+/// On startup, refresh the docker integration in the distros LiteDock set up
+/// whose shim is older than the current one — so an out-of-date or broken shim
+/// (e.g. an old `wsl.exe`-forwarding one that fails with "MZ: not found") gets
+/// replaced with no user action. Only recorded distros are touched (normally
+/// none needs it → zero `wsl.exe` calls), so the user's other distros are never
+/// booted. Runs once per session, best-effort, in the background.
 pub async fn repair_integrations() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Ordering::SeqCst) {
         return;
     }
-    for d in list_distros().await {
-        if integration_status(&d).await {
-            let _ = integration_enable(&d).await;
+
+    let Some(record) = load_integrations() else {
+        // No record yet (installs from before it existed): only look at the
+        // distros already running — never boot one just for this. Each repaired
+        // one is recorded by `integration_enable`; stopped ones get adopted when
+        // the settings UI probes them (`integration_check`).
+        let running = running_distros().await;
+        for d in list_distros().await {
+            if running.contains(&d) && shim_state(&d).await == Some(true) {
+                let _ = integration_enable(&d).await;
+            }
+        }
+        update_integrations(|_| false); // persist the (maybe empty) record
+        return;
+    };
+
+    let stale: Vec<String> = record
+        .distros
+        .iter()
+        .filter(|(_, rev)| **rev < INTEGRATION_REV)
+        .map(|(d, _)| d.clone())
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    let existing = list_distros().await;
+    if existing.is_empty() {
+        return; // wsl.exe unavailable right now — retry next launch
+    }
+    for d in stale {
+        if !existing.contains(&d) {
+            update_integrations(|r| r.distros.remove(&d).is_some()); // distro deleted
+            continue;
+        }
+        match shim_state(&d).await {
+            Some(true) => {
+                let _ = integration_enable(&d).await; // records the new revision
+            }
+            Some(false) => {
+                update_integrations(|r| r.distros.remove(&d).is_some()); // shim removed by hand
+            }
+            None => {} // couldn't tell — keep it for the next launch
         }
     }
 }

@@ -1,12 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { route, type Route } from "../stores";
+  import { route, engine, engineBusy, type Route } from "../stores";
   import { api } from "../api";
   import { bytes } from "../format";
+  import { startEngine, stopEngine, restartEngine, busyLabel } from "../engine";
+  import { getVersion } from "@tauri-apps/api/app";
+  import Icon from "./Icon.svelte";
 
   // LiteDock's own footprint (app + WSL engine), polled live.
   let cpu = $state(0);
   let ram = $state(0);
+  // Counters next to the nav entries.
+  let counts = $state<Partial<Record<Route, string>>>({});
 
   async function refreshUsage() {
     try {
@@ -17,87 +22,145 @@
       /* ignore */
     }
   }
+
+  let countsBusy = false;
+  async function refreshCounts(full: boolean) {
+    if (countsBusy || !$engine.running) return;
+    countsBusy = true;
+    try {
+      const cs = await api.listContainers();
+      const up = cs.filter((c) => c.state === "running").length;
+      const next: Partial<Record<Route, string>> = { ...counts, containers: `${up}/${cs.length}` };
+      const projects = new Set(cs.map((c) => c.compose_project).filter(Boolean));
+      next.compose = projects.size ? String(projects.size) : "";
+      if (full) {
+        const [im, vo, ne] = await Promise.allSettled([api.listImages(), api.listVolumes(), api.listNetworks()]);
+        if (im.status === "fulfilled") next.images = String(im.value.length);
+        if (vo.status === "fulfilled") next.volumes = String(vo.value.length);
+        // Leave out Docker's three built-in networks (bridge, host, none).
+        if (ne.status === "fulfilled")
+          next.networks = String(ne.value.filter((n) => !["bridge", "host", "none"].includes(n.name)).length);
+      }
+      counts = next;
+    } catch {
+      /* engine may be restarting */
+    } finally {
+      countsBusy = false;
+    }
+  }
+
+  // Refresh every count as soon as the engine comes up; clear them when it stops.
+  $effect(() => {
+    if ($engine.running) refreshCounts(true);
+    else counts = {};
+  });
+
+  let version = $state("");
+  getVersion()
+    .then((v) => (version = v))
+    .catch(() => {});
+
   onMount(() => {
     refreshUsage();
-    const t = setInterval(refreshUsage, 4000);
+    let tick = 0;
+    const t = setInterval(() => {
+      refreshUsage();
+      tick++;
+      // Containers every 5 s, the slower-changing lists every 30 s.
+      refreshCounts(tick % 6 === 0);
+    }, 5000);
     return () => clearInterval(t);
   });
 
-  const items: { id: Route; label: string; icon: string }[] = [
-    { id: "dashboard", label: "Panel", icon: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z" },
-    {
-      id: "containers",
-      label: "Contenedores",
-      icon: "M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16zM3.27 6.96 12 12.01l8.73-5.05M12 22.08V12",
-    },
-    { id: "images", label: "Imágenes", icon: "M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" },
-    {
-      id: "volumes",
-      label: "Volúmenes",
-      icon: "M12 2c4.42 0 8 1.34 8 3s-3.58 3-8 3-8-1.34-8-3 3.58-3 8-3zM4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3",
-    },
-    {
-      id: "networks",
-      label: "Redes",
-      icon: "M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98",
-    },
-    { id: "build", label: "Build", icon: "M4 17l6-6-6-6M12 19h8" },
-    {
-      id: "compose",
-      label: "Compose",
-      icon: "M6 3v12M18 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15 6a9 9 0 0 1-9 9",
-    },
+  const general: { id: Route; label: string; icon: string }[] = [
+    { id: "dashboard", label: "Panel", icon: "panel" },
+    { id: "containers", label: "Contenedores", icon: "container" },
+    { id: "images", label: "Imágenes", icon: "image" },
+    { id: "volumes", label: "Volúmenes", icon: "volume" },
+    { id: "networks", label: "Redes", icon: "network" },
+  ];
+  const create: { id: Route; label: string; icon: string }[] = [
+    { id: "build", label: "Build", icon: "build" },
+    { id: "compose", label: "Compose", icon: "compose" },
   ];
 </script>
 
-<aside class="sidebar">
+{#snippet navItem(it: { id: Route; label: string; icon: string })}
+  <button
+    class="nav-item {$route === it.id ? 'active' : ''}"
+    aria-current={$route === it.id ? "page" : undefined}
+    onclick={() => route.set(it.id)}
+  >
+    <Icon name={it.icon} />
+    <span class="nav-text">{it.label}</span>
+    {#if counts[it.id]}<span class="nav-count">{counts[it.id]}</span>{/if}
+  </button>
+{/snippet}
+
+<aside class="sidebar" aria-label="Navegación principal">
   <div class="brand">
     <svg class="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-      <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#g)" />
+      <rect x="1" y="1" width="30" height="30" rx="8" fill="#2dd4bf" />
       <rect x="9" y="14" width="4" height="4" rx="1" fill="#04130f" />
       <rect x="14" y="14" width="4" height="4" rx="1" fill="#04130f" />
       <rect x="19" y="14" width="4" height="4" rx="1" fill="#04130f" />
       <rect x="11.5" y="9" width="4" height="4" rx="1" fill="#04130f" />
       <rect x="16.5" y="9" width="4" height="4" rx="1" fill="#04130f" />
       <path d="M7 19h18a6 6 0 0 1-6 5h-6a6 6 0 0 1-6-5z" fill="#04130f" />
-      <defs>
-        <linearGradient id="g" x1="0" y1="0" x2="32" y2="32">
-          <stop stop-color="#2dd4bf" />
-          <stop offset="1" stop-color="#38bdf8" />
-        </linearGradient>
-      </defs>
     </svg>
     <div>
       <b>LiteDock</b><br />
-      <span>v1.3.0</span>
+      <span>{version ? `v${version}` : ""}</span>
     </div>
   </div>
 
-  {#each items as it (it.id)}
-    <button
-      class="nav-item {$route === it.id ? 'active' : ''}"
-      onclick={() => route.set(it.id)}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d={it.icon} />
-      </svg>
-      {it.label}
-    </button>
+  <span class="nav-label">General</span>
+  {#each general as it (it.id)}
+    {@render navItem(it)}
+  {/each}
+
+  <span class="nav-label" style="padding-top:14px">Crear</span>
+  {#each create as it (it.id)}
+    {@render navItem(it)}
   {/each}
 
   <div class="nav-spacer"></div>
 
-  <button class="nav-item {$route === 'config' ? 'active' : ''}" onclick={() => route.set('config')}>
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
-      <path d="M19.4 13a1.65 1.65 0 0 0 .33 1.82l.05.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.17V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.05a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 8.4l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 2.82 1.17l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9z" />
-    </svg>
-    Configuración
-  </button>
+  {@render navItem({ id: "config", label: "Configuración", icon: "settings" })}
 
-  <div class="footprint" title="Consumo de LiteDock (app + motor WSL)">
-    <div class="fp-title">Consumo de LiteDock</div>
-    <div class="fp-row"><span>CPU</span><b>{cpu.toFixed(1)}%</b></div>
-    <div class="fp-row"><span>RAM</span><b>{bytes(ram)}</b></div>
-  </div>
+  <section class="engine-card" aria-label="Motor de LiteDock">
+    <div class="ec-head">
+      <span class="dot {$engineBusy ? 'busy' : $engine.running ? 'up' : 'down'}"></span>
+      <span class="ec-title" role="status">
+        {#if $engineBusy}
+          {busyLabel[$engineBusy]}
+        {:else if $engine.running}
+          Motor activo
+        {:else}
+          Motor detenido
+        {/if}
+      </span>
+      {#if $engine.running && $engine.version}
+        <span class="ec-version" title="Versión de Docker Engine">{$engine.version}</span>
+      {/if}
+    </div>
+    <div class="ec-usage" title="Consumo de LiteDock: la app y su motor en WSL">
+      <span>CPU <b>{cpu.toFixed(1)}%</b></span>
+      <span>RAM <b>{bytes(ram)}</b></span>
+    </div>
+    <div class="ec-actions">
+      {#if $engine.running}
+        <button class="btn" onclick={restartEngine} disabled={!!$engineBusy}>
+          {#if $engineBusy === "restart"}<span class="spinner"></span>{/if} Reiniciar
+        </button>
+        <button class="btn danger" onclick={stopEngine} disabled={!!$engineBusy}>
+          {#if $engineBusy === "stop"}<span class="spinner"></span>{/if} Detener
+        </button>
+      {:else}
+        <button class="btn primary" onclick={startEngine} disabled={!!$engineBusy}>
+          {#if $engineBusy === "start"}<span class="spinner"></span>{/if} Iniciar motor
+        </button>
+      {/if}
+    </div>
+  </section>
 </aside>

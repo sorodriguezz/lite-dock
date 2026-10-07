@@ -24,17 +24,46 @@
       "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83ZM2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17",
     disk:
       "M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01",
+    panel: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
+    build:
+      "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
+    compose: "M3 3h8v8H3zM13 13h8v8h-8zM7 11v4a2 2 0 0 0 2 2h4",
+    terminal: "M4 17l6-6-6-6M12 19h8",
+    restart: "M21 12a9 9 0 1 1-2.64-6.36M21 4v4h-4",
+    trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
+    external: "M7 17 17 7M8 7h9v9",
+    copy: "M9 9h12v12H9zM5 15V5a2 2 0 0 1 2-2h10",
+    search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-3.5-3.5",
+    download: "M12 3v12M7 10l5 5 5-5M5 21h14",
+    upload: "M12 21V9M7 14l5-5 5 5M5 3h14",
+    folder: "M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+    file: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6",
+    power: "M12 3v9M6.3 7.3a8 8 0 1 0 11.4 0",
+    x: "M6 6l12 12M18 6 6 18",
+    alert: "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+    eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+    refresh: "M21 12a9 9 0 1 1-2.64-6.36M21 4v4h-4",
+    chevron: "m9 6 6 6-6 6",
+    pause: "M8 5v14M16 5v14",
+    info: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01",
+  };
+  // Solid glyphs (media controls) read better filled than outlined.
+  const filled: Record<string, string> = {
+    play: "M7 4l13 8-13 8z",
+    stop: "M6 6h12v12H6z",
+    more: "M5 13.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6zM12 13.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6zM19 13.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6z",
   };
 
-  let d = $derived(paths[name] ?? "");
+  let solid = $derived(name in filled);
+  let d = $derived(filled[name] ?? paths[name] ?? "");
 </script>
 
 <svg
   viewBox="0 0 24 24"
   width={size}
   height={size}
-  fill="none"
-  stroke="currentColor"
+  fill={solid ? "currentColor" : "none"}
+  stroke={solid ? "none" : "currentColor"}
   stroke-width="1.8"
   stroke-linecap="round"
   stroke-linejoin="round"

@@ -7,22 +7,22 @@ use serde::{Serialize, Serializer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("Docker engine error: {0}")]
+    #[error("Error del motor Docker: {0}")]
     Docker(#[from] bollard::errors::Error),
 
-    #[error("I/O error: {0}")]
+    #[error("Error de E/S: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("serialization error: {0}")]
+    #[error("Error de serialización: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("Tauri error: {0}")]
+    #[error("Error de Tauri: {0}")]
     Tauri(#[from] tauri::Error),
 
-    #[error("WSL is not available: {0}")]
+    #[error("WSL no está disponible: {0}")]
     WslUnavailable(String),
 
-    #[error("setup failed: {0}")]
+    #[error("Falló la instalación: {0}")]
     Setup(String),
 
     #[error("{0}")]

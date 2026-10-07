@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { api, listen, type UnlistenFn } from "../api";
-  import { notify } from "../stores";
+  import { notify, terminalReq } from "../stores";
   import LogConsole from "./LogConsole.svelte";
 
   type Kind = "host" | "engine";
@@ -37,24 +37,36 @@
     if (session) api.terminalKill(session).catch(() => {});
   });
 
+  // Each start() bumps this; a shell that finishes spawning after a newer start()
+  // (fast PowerShell ↔ Motor switches, double-clicked restart) is killed instead
+  // of being left running as an orphan.
+  let startGen = 0;
   async function start() {
-    if (session) {
-      try {
-        await api.terminalKill(session);
-      } catch {
-        /* ignore */
-      }
-      session = null;
-    }
+    const gen = ++startGen;
+    const old = session;
+    session = null;
+    if (old) api.terminalKill(old).catch(() => {});
     lines = [];
     starting = true;
     try {
-      session = await api.terminalStart(kind);
+      const id = await api.terminalStart(kind);
+      if (gen === startGen) session = id;
+      else api.terminalKill(id).catch(() => {});
     } catch (e) {
-      notify("error", String(e));
+      if (gen === startGen) notify("error", String(e));
     }
-    starting = false;
+    if (gen === startGen) starting = false;
   }
+
+  // Other views can ask the panel to open on a given shell (e.g. Panel › Atajos).
+  $effect(() => {
+    const req = $terminalReq;
+    if (!req) return;
+    terminalReq.set(null);
+    open = true;
+    if (req.kind !== kind) switchKind(req.kind);
+    else if (!session && !starting) start();
+  });
 
   function toggle() {
     open = !open;
@@ -121,7 +133,7 @@
 
 <div class="term-dock {open ? 'open' : ''}">
   <div class="term-head">
-    <button class="term-toggle" onclick={toggle} title={open ? "Colapsar terminal" : "Abrir terminal"}>
+    <button class="term-toggle" onclick={toggle} title={open ? "Colapsar terminal" : "Abrir terminal"} aria-expanded={open}>
       <svg class="chev {open ? 'up' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
       <svg class="term-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -144,11 +156,11 @@
 
     {#if open}
       {#if starting}<span class="spinner"></span>{/if}
-      <button class="term-icon" title="Limpiar" onclick={() => (lines = [])} disabled={!lines.length}>
+      <button class="term-icon" title="Limpiar" aria-label="Limpiar la salida" onclick={() => (lines = [])} disabled={!lines.length}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg>
       </button>
-      <button class="term-icon" title="Reiniciar shell" onclick={start}>
+      <button class="term-icon" title="Reiniciar shell" aria-label="Reiniciar shell" onclick={start}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
       </button>

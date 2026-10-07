@@ -2,6 +2,9 @@
   // Launched projects persist across navigation AND app restarts (localStorage),
   // so Down / Logs keep working after you leave the view. Live status itself is
   // always derived from Docker, so it's accurate even after an external change.
+  // The history is module-level state (not per mount) so a `compose up` that
+  // finishes while you're on another view is remembered in the list you return
+  // to. The running job (busy flag, log, event listener) is in ../jobs.svelte.ts.
   interface ComposeHist {
     project: string;
     file: string;
@@ -23,19 +26,18 @@
       /* ignore */
     }
   }
-  // Keep the last run's output + heading so leaving/returning doesn't lose it.
-  let lastLines: string[] = [];
-  let lastLabel = "";
+  let history = $state<ComposeHist[]>(loadHist());
 </script>
 
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { onMount, onDestroy } from "svelte";
-  import { api, listen, type UnlistenFn } from "../api";
+  import { onMount, untrack } from "svelte";
+  import { api } from "../api";
   import { notify, askConfirm } from "../stores";
+  import { composeJob as job } from "../jobs.svelte";
   import LogConsole from "../components/LogConsole.svelte";
   import Icon from "../components/Icon.svelte";
-  import type { Container, OutputLine } from "../types";
+  import type { Container } from "../types";
   import { ago } from "../format";
 
   type Proj = {
@@ -49,12 +51,7 @@
 
   let file = $state("");
   let project = $state("");
-  let busy = $state(""); // current action id, "" = idle
-  let lines = $state<string[]>(lastLines);
-  let label = $state(lastLabel);
-  let history = $state<ComposeHist[]>(loadHist());
   let containers = $state<Container[]>([]);
-  let unlisten: UnlistenFn | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
 
   // Union of remembered projects + live containers grouped by compose project.
@@ -104,24 +101,6 @@
     }
   }
 
-  async function ensureListener() {
-    if (unlisten) return;
-    unlisten = await listen<OutputLine>("compose-output", (e) => {
-      const p = e.payload;
-      if (!p.line.startsWith("__EXIT__")) {
-        lines = [...lines, p.line].slice(-4000);
-        lastLines = lines;
-      }
-    });
-  }
-
-  function startLog(heading: string, seed: string[] = []) {
-    label = heading;
-    lastLabel = heading;
-    lines = seed;
-    lastLines = seed;
-  }
-
   function guessProject(p: string): string {
     const parts = p.replace(/\\/g, "/").split("/");
     return (parts[parts.length - 2] || "litedock").toLowerCase().replace(/[^a-z0-9_-]/g, "");
@@ -138,51 +117,65 @@
     }
   }
 
-  // Run a streamed compose action (up/down/logs) and refresh state.
-  async function stream(id: string, heading: string, fn: () => Promise<number>, after?: () => void) {
-    busy = id;
-    await ensureListener();
-    startLog(heading);
-    try {
-      const code = await fn();
-      if (code === 0) {
-        notify("success", `${heading} ✓`);
-        after?.();
-      } else {
-        notify("error", `${heading} terminó con código ${code}`);
+  // Run a streamed compose action (up/down/logs) as the shared compose job; the
+  // view refreshes when it ends (see the $effect below).
+  async function stream(
+    id: string,
+    heading: string,
+    fn: () => Promise<number>,
+    msg: { ok: string; fail: (code: number) => string },
+    after?: () => void,
+  ) {
+    await job.run(id, heading, async () => {
+      try {
+        const code = await fn();
+        if (code === 0) {
+          notify("success", msg.ok);
+          after?.();
+        } else {
+          notify("error", msg.fail(code));
+        }
+      } catch (e) {
+        notify("error", String(e));
       }
-    } catch (e) {
-      notify("error", String(e));
-    }
-    busy = "";
-    refresh();
+    });
   }
 
+  function up(name: string, f: string) {
+    return stream(
+      `up:${name}`,
+      `Levantando · ${name}`,
+      () => api.composeUp(f, name),
+      { ok: `${name} levantado`, fail: (code) => `No se pudo levantar ${name} (código ${code})` },
+      () => rememberLaunch(name, f),
+    );
+  }
   async function launch() {
     if (!file) return notify("error", "Selecciona un archivo compose");
-    const proj = (project || guessProject(file)).trim();
-    await stream(`up:${proj}`, `compose up · ${proj}`, () => api.composeUp(file, proj), () => rememberLaunch(proj, file));
+    await up((project || guessProject(file)).trim(), file);
   }
   async function projUp(p: Proj) {
     if (!p.file) return notify("error", "No recuerdo su archivo; vuelve a lanzarlo desde arriba.");
-    await stream(`up:${p.name}`, `compose up · ${p.name}`, () => api.composeUp(p.file, p.name), () => rememberLaunch(p.name, p.file));
+    await up(p.name, p.file);
   }
   async function projDown(p: Proj) {
-    if (!(await askConfirm({ title: "Compose down", message: `¿Detener y eliminar el proyecto "${p.name}"? Se borrarán sus contenedores y redes.` }))) return;
+    if (!(await askConfirm({ title: "Bajar el proyecto", message: `¿Detener y eliminar el proyecto "${p.name}"? Se borrarán sus contenedores y redes.` }))) return;
     if (p.file) {
-      await stream(`down:${p.name}`, `compose down · ${p.name}`, () => api.composeDown(p.file, p.name));
+      await stream(`down:${p.name}`, `Bajando · ${p.name}`, () => api.composeDown(p.file, p.name), {
+        ok: `${p.name} detenido`,
+        fail: (code) => `No se pudo bajar ${p.name} (código ${code})`,
+      });
       return;
     }
     // No remembered file → tear down by label (stop+remove + drop default network).
-    busy = `down:${p.name}`;
-    startLog(`down · ${p.name}`, [`$ eliminando contenedores de "${p.name}"…`]);
-    try {
-      for (const c of containers.filter((c) => c.compose_project === p.name)) {
+    const doomed = containers.filter((c) => c.compose_project === p.name);
+    await job.run(`down:${p.name}`, `Bajando · ${p.name}`, async () => {
+      for (const c of doomed) {
         try {
           await api.removeContainer(c.id, true);
-          lines = [...lines, `  removido ${c.name}`];
+          job.append(`  eliminado ${c.name}`);
         } catch (e) {
-          lines = [...lines, `  error ${c.name}: ${e}`];
+          job.append(`  error ${c.name}: ${e}`);
         }
       }
       try {
@@ -190,33 +183,34 @@
       } catch {
         /* network may not exist */
       }
-      lines = [...lines, "listo."];
-      lastLines = lines;
+      job.append("listo.");
       notify("success", `${p.name} detenido`);
-    } catch (e) {
-      notify("error", String(e));
-    }
-    busy = "";
-    refresh();
+    }, [`$ eliminando contenedores de "${p.name}"…`]);
   }
   async function projLogs(p: Proj) {
     if (!p.file) return notify("error", "No recuerdo su archivo; vuelve a lanzarlo desde arriba para ver sus logs.");
-    await stream(`logs:${p.name}`, `compose logs · ${p.name}`, () => api.composeLogs(p.file, p.name));
+    await stream(`logs:${p.name}`, `Logs · ${p.name}`, () => api.composeLogs(p.file, p.name), {
+      ok: `Logs de ${p.name} obtenidos`,
+      fail: (code) => `No se pudieron obtener los logs de ${p.name} (código ${code})`,
+    });
   }
 
-  onMount(() => {
-    refresh();
-    poll = setInterval(refresh, 4000);
+  // Refresh on mount and whenever a compose action ends — including one started
+  // before you left this view and came back.
+  $effect(() => {
+    void job.finished;
+    untrack(refresh);
   });
-  onDestroy(() => {
-    unlisten?.();
-    if (poll) clearInterval(poll);
+  onMount(() => {
+    poll = setInterval(refresh, 4000);
+    return () => clearInterval(poll);
   });
 </script>
 
 <div class="page-head">
   <span class="ph-icon"><Icon name="container" /></span>
   <h2>Docker Compose</h2>
+  <p class="page-sub">Proyectos de varios contenedores</p>
   <span class="count">{projects.length}</span>
   <div class="grow"></div>
   <button class="btn" onclick={refresh}>Refrescar</button>
@@ -235,8 +229,8 @@
     <label for="pj">Proyecto (opcional)</label>
     <input id="pj" type="text" placeholder="se deduce de la carpeta del archivo" bind:value={project} />
   </div>
-  <button class="btn primary" onclick={launch} disabled={!!busy}>
-    {#if busy.startsWith("up:")}<span class="spinner"></span>{/if} Levantar (up -d)
+  <button class="btn primary" onclick={launch} disabled={!!job.busy}>
+    {#if job.busy.startsWith("up:")}<span class="spinner"></span>{/if} Levantar
   </button>
 </div>
 
@@ -265,13 +259,16 @@
             <td class="mono ellip" title={p.file}>{p.file || "—"}</td>
             <td>
               <div class="cell-actions">
-                <button class="btn" onclick={() => projLogs(p)} disabled={!!busy || !p.file} title={p.file ? "Ver logs" : "Sin archivo recordado"}>Logs</button>
-                {#if p.running > 0}
-                  <button class="btn danger" onclick={() => projDown(p)} disabled={!!busy}>Down</button>
-                {:else}
-                  <button class="btn ok" onclick={() => projUp(p)} disabled={!!busy || !p.file} title={p.file ? "Volver a levantar" : "Sin archivo recordado"}>Up</button>
+                <button class="btn" onclick={() => projLogs(p)} disabled={!!job.busy || !p.file} title={p.file ? "Ver logs" : "Sin archivo recordado"}>Logs</button>
+                {#if p.running < p.total || p.total === 0}
+                  <button class="btn ok" onclick={() => projUp(p)} disabled={!!job.busy || !p.file} title={p.file ? "Volver a levantar (compose up)" : "Sin archivo recordado"}>Levantar</button>
                 {/if}
-                <button class="btn icon" title={p.live ? "Detenlo antes de quitarlo del histórico" : "Quitar del histórico"} aria-label="Quitar del histórico" onclick={() => forget(p.name)} disabled={p.live}>🗑</button>
+                <!-- Also offered for stopped projects: otherwise one started from the CLI
+                     (no remembered file) could never be removed. -->
+                {#if p.total > 0}
+                  <button class="btn danger" onclick={() => projDown(p)} disabled={!!job.busy} title="Detener y eliminar sus contenedores y redes (compose down)">Bajar</button>
+                {/if}
+                <button class="btn icon" title={p.live ? "Detenlo antes de quitarlo del histórico" : "Quitar del histórico"} aria-label="Quitar del histórico" onclick={() => forget(p.name)} disabled={p.live}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg></button>
               </div>
             </td>
           </tr>
@@ -286,13 +283,13 @@
   </div>
 {/if}
 
-{#if label}
+{#if job.label}
   <div class="label" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-    {label}{#if busy}<span class="spinner"></span>{/if}
+    {job.label}{#if job.busy}<span class="spinner"></span>{/if}
   </div>
 {/if}
 <div style="height:34vh">
-  <LogConsole {lines} placeholder="La salida de compose aparecerá aquí…" />
+  <LogConsole lines={job.lines} placeholder="La salida de compose aparecerá aquí…" />
 </div>
 
 <style>
